@@ -17,7 +17,7 @@ cv_font = cv2.FONT_HERSHEY_PLAIN
 frame_queue = Queue(maxsize=5)  # Limit queue size to avoid lag accumulation
 
 # Load the YOLO model
-model = YOLO("./models/yolo11n.pt") 
+model = YOLO("./models/raindrops-yolo11n-v1.pt") 
 
 # Find and connect to the Android device
 device_list = adb.device_list()
@@ -29,7 +29,7 @@ adb_device = adb.device_list()[0]
 # max_size limits the resolution to improve performance.
 video_config = VideoKwargs(
     video_codec=VideoKwargs.EnumVideoCodec.H264,  # or H265 / AV1 depending on device support
-    max_size=640,
+    max_size=1280,
     max_fps=TARGET_FPS
 )
 
@@ -109,7 +109,7 @@ try:
         # Display the resulting frame in an OpenCV window
         cv2.imshow("YOLO Live Inference", frame)
 
-        # Break the loop if 'q' is pressed
+        # Break the loop if 'q' is pressed in the display window
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 

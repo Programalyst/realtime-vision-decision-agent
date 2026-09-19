@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local datasets and generated artifacts
+/recordings/
+/frames/
+/Collect-Raindrops-*/
+/runs/
+*.pt
+!/models/raindrops-yolo11n-v1.pt
