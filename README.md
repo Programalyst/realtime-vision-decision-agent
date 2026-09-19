@@ -55,3 +55,36 @@ scrcpy \
 --max-fps=30 \
 --record=recordings/gameplay-01.mp4
 ```
+
+# Replay recordings through YOLO
+
+No phone connection is needed. Run the custom model on every decoded frame:
+
+```bash
+uv run python testYoloVideo.py recordings/gameplay-01.mp4 --show
+```
+
+The default model is `models/raindrops-yolo11n-v2.pt`, with confidence 0.25,
+inference size 640, and capture resized to a maximum dimension of 1280 to
+match `testYolo.py`. Use `--model` to select another checkpoint.
+
+To investigate low-confidence droplets on the same section:
+
+```bash
+uv run python testYoloVideo.py recordings/gameplay-01.mp4 --start 10 --max-frames 150 --conf 0.05 --show
+```
+
+Space pauses/resumes the preview; Q or Escape stops. Omit `--show` to process
+without a window. Each run creates a new folder under ignored `runs/video/`
+containing an H.264-encoded `annotated.mp4` and a CSV of detections with confidence, source
+frame/time, and box/center coordinates in the resized frame's pixel space.
+The CSV includes frame dimensions; frames with no detections have no rows.
+Console counts include repeated detections across frames, not unique objects.
+Video encoding uses the existing PyAV dependency (`av`) with `libx264`, `yuv420p`,
+and MP4 fast-start for playback compatibility. Odd frame dimensions are padded
+by one black pixel on the right/bottom; CSV coordinates stay unchanged.
+The output video has no audio and uses the source's average frame rate; scrcpy
+recordings can have variable timing, so use the CSV source timestamps for timing
+analysis. Processing never intentionally skips frames; a slow preview may run
+slower than real time. Low-confidence detections are candidates to inspect, not
+verified objects.

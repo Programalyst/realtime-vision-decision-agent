@@ -10,6 +10,9 @@ import time
 # --- 1. Initialization ---
 
 TARGET_FPS: int = 30
+# Diagnostic threshold: this checkpoint assigns very low scores to bombs/droplets.
+# Inspect the displayed scores before choosing a threshold for gameplay decisions.
+DETECTION_CONFIDENCE: float = 0.25
 box_color = (0, 255, 0)  # Green color for bounding boxes
 box_thickness = 2
 label_font_scale = 1
@@ -17,7 +20,8 @@ cv_font = cv2.FONT_HERSHEY_PLAIN
 frame_queue = Queue(maxsize=5)  # Limit queue size to avoid lag accumulation
 
 # Load the YOLO model
-model = YOLO("./models/raindrops-yolo11n-v1.pt") 
+model = YOLO("./models/raindrops-yolo11n-v2.pt") 
+print(f"Loaded classes: {model.names}")
 
 # Find and connect to the Android device
 device_list = adb.device_list()
@@ -72,8 +76,10 @@ try:
         # Get a frame from the queue (blocks until a frame is available)
         frame = frame_queue.get(block=True)
 
-        # Run YOLO inference directly on the BGR frame
-        results: list[Results] = model.track(frame, verbose=False)
+        # Inspect raw detections without the tracker's additional score filtering.
+        results: list[Results] = model.predict(
+            frame, conf=DETECTION_CONFIDENCE, imgsz=640, verbose=False
+        )
         for result in results:
             for box in result.boxes:
                 # Get bounding box coordinates
@@ -84,7 +90,8 @@ try:
                 
                 class_id = int(box.cls.item())
                 class_name = model.names[class_id]
-                label = f"{class_name} x={center_x}, y={center_y}"
+                confidence = float(box.conf.item())
+                label = f"{class_name} {confidence:.3f} x={center_x}, y={center_y}"
 
                 # 1. Draw the bounding box rectangle on the BGR frame
                 cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, box_thickness)
