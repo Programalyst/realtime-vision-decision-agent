@@ -5,47 +5,14 @@ import csv
 import math
 from collections import Counter
 from datetime import datetime
-from fractions import Fraction
 from pathlib import Path
 import time
 
-import av
 import cv2
 from ultralytics import YOLO
+from video_writer import H264Writer
 
 
-class H264Writer:
-    """Encode BGR frames as H.264 MP4 using the existing PyAV dependency."""
-
-    def __init__(self, path, fps, width, height):
-        self.container = av.open(str(path), mode="w", options={"movflags": "+faststart"})
-        try:
-            self.stream = self.container.add_stream("libx264", rate=Fraction(str(fps)).limit_denominator(100000))
-            # yuv420p requires even dimensions; pad rather than distort the image.
-            self.stream.width = width + width % 2
-            self.stream.height = height + height % 2
-            self.stream.pix_fmt = "yuv420p"
-            self.stream.options = {"crf": "20", "preset": "medium"}
-        except Exception:
-            self.container.close()
-            raise
-        self.width, self.height = width, height
-
-    def write(self, frame):
-        if frame.shape[:2] != (self.height, self.width):
-            raise ValueError("Video frame dimensions changed during recording")
-        frame = cv2.copyMakeBorder(frame, 0, self.height % 2, 0, self.width % 2,
-                                   cv2.BORDER_CONSTANT, value=(0, 0, 0))
-        for packet in self.stream.encode(av.VideoFrame.from_ndarray(frame, format="bgr24")):
-            self.container.mux(packet)
-
-    def release(self):
-        try:
-            # Flush delayed frames before writing the MP4 trailer.
-            for packet in self.stream.encode():
-                self.container.mux(packet)
-        finally:
-            self.container.close()
 
 
 def main():
