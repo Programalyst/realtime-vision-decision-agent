@@ -20,7 +20,7 @@ cv_font = cv2.FONT_HERSHEY_PLAIN
 frame_queue = Queue(maxsize=5)  # Limit queue size to avoid lag accumulation
 
 # Load the YOLO model
-model = YOLO("./models/raindrops-yolo11n-v2.pt") 
+model = YOLO("./models/raindrops-yolo11n-v3.pt") 
 print(f"Loaded classes: {model.names}")
 
 # Find and connect to the Android device

@@ -51,7 +51,7 @@ class H264Writer:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("video", nargs="?", type=Path, default=Path("recordings/gameplay-01.mp4"))
-    parser.add_argument("--model", type=Path, default=Path("models/raindrops-yolo11n-v2.pt"))
+    parser.add_argument("--model", type=Path, default=Path("models/raindrops-yolo11n-v3.pt"))
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--max-size", type=int, default=1280,
