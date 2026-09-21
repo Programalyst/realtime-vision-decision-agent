@@ -1,6 +1,8 @@
 # Realtime Vision Decision Agent
 
-A vision pipeline for playing an Android raindrop-collection game. A custom
+![Deterministic controller gameplay](images/deterministic-gameplay-demo.gif)
+
+A vision pipeline for playing Lazada's raindrop-collection game. A custom
 YOLO11n model detects droplets, bombs, and the watering can, providing object
 positions for deterministic or Jev-driven game control.
 
