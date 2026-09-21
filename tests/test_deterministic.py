@@ -129,24 +129,122 @@ class PlannerTests(unittest.TestCase):
             obj('droplet', .3, .50), obj('bomb', .45, .60)), 1)
         self.assertFalse(any(c.id == 'catch_1_then_catch_3' for c in choices.candidates))
 
-    def test_escape_deadline_does_not_slide_and_is_revalidated(self):
+    def test_row_target_persists_and_busy_does_not_issue_decisions(self):
         policy = DeterministicController()
         policy.set_enabled(True)
-        s = state(obj('droplet', .65, .68), obj('bomb', .65, .48),
-                  obj('droplet', .3, .50))
-        policy.update(s, 1)
-        pending = dict(policy.pending_escape)
-        s_next = state(obj('droplet', .65, .6835), obj('bomb', .65, .4835),
-                       obj('droplet', .3, .5035))
-        policy.update(s_next, 1.01)
-        self.assertEqual(policy.pending_escape['command_at'], pending['command_at'])
-        # At the deadline, new evidence puts a bomb directly on the mouth:
-        # the cached escape is no longer predicted safe and must be abandoned.
-        s2 = {'objects': [obj('watering_can', .6428, .85, .16, .12),
-                          obj('bomb', .65, .81)]}
-        policy.update(s2, pending['command_at']+.01)
-        self.assertIsNone(policy.pending_escape)
-        self.assertFalse(policy.decision.safe)
+        policy.update(state(obj('droplet', .65, .68), obj('droplet', .3, .50)),1)
+        row = policy.active_track
+        target = policy.decision.target_x
+        policy.update(state(obj('droplet', .65, .69), obj('droplet', .3, .51)),1.03,
+                      movement_ready=False)
+        self.assertEqual(policy.active_track,row)
+        self.assertIsNone(policy.decision)
+        policy.update(state(obj('droplet', .65, .70), obj('droplet', .3, .52)),1.06)
+        self.assertEqual(policy.active_track,row)
+        self.assertAlmostEqual(policy.decision.target_x,target)
+
+    def test_new_faster_bomb_cannot_preempt_lower_droplet(self):
+        policy = DeterministicController()
+        policy.set_enabled(True)
+        policy.update(state(obj('droplet', .70, .40)), 1)
+        row = policy.active_track
+        # Established drop speed .20; newborn bomb fallback .35 previously
+        # put the higher bomb first and sent the can away from the droplet.
+        policy.update(state(obj('droplet', .70, .42), obj('bomb', .70, .27)), 1.1)
+        self.assertEqual(policy.active_track, row)
+        self.assertAlmostEqual(policy.decision.target_x, .70-.0072)
+        self.assertTrue(policy.decision.safe)
+        self.assertAlmostEqual(policy.choices.tracks[0].speed,
+                               policy.choices.tracks[1].speed)
+
+    def test_reacquired_lower_drop_preempts_higher_row(self):
+        policy = DeterministicController()
+        policy.set_enabled(True)
+        policy.update(state(obj('droplet', .30, .40)), 1)
+        policy.update(state(obj('droplet', .30, .42), obj('droplet', .70, .65)), 1.1)
+        active = next(t for t in policy.choices.tracks if t.id == policy.active_track)
+        self.assertAlmostEqual((active.box[0]+active.box[2])/2, .70)
+        self.assertAlmostEqual(policy.decision.target_x, .70-.0072)
+
+    def test_bomb_dodge_toward_following_drop(self):
+        for drop_x, direction in [(.2,-1),(.8,1)]:
+            policy = DeterministicController()
+            policy.set_enabled(True)
+            policy.update(state(obj('bomb', .5072, .70),obj('droplet',drop_x,.50)),1)
+            self.assertTrue(policy.decision.safe)
+            self.assertGreater((policy.decision.target_x-.5)*direction,0)
+            self.assertAlmostEqual(policy.decision.target_x, drop_x-.0072)
+
+    def test_row_advances_after_object_passes(self):
+        policy = DeterministicController()
+        policy.set_enabled(True)
+        policy.update(state(obj('droplet', .65, .76),obj('droplet',.3,.60)),1)
+        row = policy.active_track
+        policy.update(state(obj('droplet', .65, .86),obj('droplet',.3,.68)),1.2)
+        self.assertNotEqual(policy.active_track,row)
+        self.assertLess(policy.decision.target_x,.5)
+
+    def test_leading_bomb_is_not_ignored_for_droplet(self):
+        policy = DeterministicController()
+        policy.set_enabled(True)
+        policy.update(state(obj('bomb', .5072,.70),obj('droplet',.5,.60)),1)
+        track = next(t for t in policy.choices.tracks if t.id==policy.active_track)
+        self.assertEqual(track.kind,'bomb')
+        self.assertNotEqual(policy.decision.target_x,.5)
+
+    def test_two_bombs_allow_early_alignment_with_next_double_drop(self):
+        policy = DeterministicController()
+        policy.set_enabled(True)
+        # Approximate screenshot 1 geometry: can and bombs right, double left.
+        scene = {'objects': [obj('watering_can', .68, .89, .43, .15),
+                 obj('bomb', .73, .72, .145, .075),
+                 obj('bomb', .73, .61, .145, .075),
+                 obj('droplet', .35, .46, .145, .065)]}
+        policy.update(scene, 1)
+        self.assertTrue(policy.decision.safe)
+        self.assertAlmostEqual(policy.decision.target_x, .35-.43*.045)
+
+    def test_missing_caught_drop_does_not_block_next_drop(self):
+        policy = DeterministicController()
+        policy.set_enabled(True)
+        policy.update(state(obj('droplet', .5072, .79), obj('droplet', .25, .65)), 1)
+        previous = policy.active_track
+        policy.update(state(obj('droplet', .25, .66)), 1.03)
+        self.assertNotEqual(policy.active_track, previous)
+        self.assertAlmostEqual(policy.decision.target_x, .25-.0072)
+        self.assertTrue(any(t.id == previous for t in policy.choices.tracks))
+
+    def test_too_late_drop_does_not_block_following_double_drop(self):
+        policy = DeterministicController()
+        policy.set_enabled(True)
+        policy.update(state(obj('droplet', .85, .82),
+                            obj('droplet', .25, .68, .08, .04)), 1)
+        self.assertAlmostEqual(policy.decision.target_x, .25-.0072)
+
+    def test_safety_extends_past_row_clearance_through_drag(self):
+        choices = ChoicePreprocessor().update(state(
+            obj('droplet', .5072, .80), obj('bomb', .70, .76)), 1, row_mode=True)
+        right = next(c for c in choices.candidates if c.id == 'evade_right')
+        self.assertFalse(right.safe)
+        self.assertGreater(right.collision_at, .10)
+
+    def test_edge_droplets_are_not_clamped_by_body(self):
+        for drop_x in (.15, .85):
+            s = {'objects': [obj('watering_can', .5, .85, .43, .14),
+                             obj('droplet', drop_x, .60)]}
+            choice = select_candidate(ChoicePreprocessor().update(s, 1))
+            self.assertAlmostEqual(choice.target_x + .43*.045, drop_x)
+            self.assertIsNotNone(choice.catch_at)
+
+    def test_clipped_can_retains_mouth_geometry(self):
+        planner = ChoicePreprocessor()
+        planner.update({'objects':[obj('watering_can', .5, .85, .43, .14)]},1)
+        # Body centered at .13 extends to -.085; the detector only sees x >= 0.
+        clipped = {'class':'watering_can','confidence':.9,
+                   'box':[0,.78,.345,.92], 'center':[.1725,.85]}
+        choices = planner.update({'objects':[clipped]},1.1)
+        self.assertAlmostEqual(choices.can['center'][0],.13)
+        self.assertAlmostEqual((choices.mouth_box[0]+choices.mouth_box[2])/2,.14935)
 
     def test_pause_resets_tracks(self):
         policy=DeterministicController()

@@ -144,7 +144,11 @@ try:
         )
         if jev:
             state = detection_state(results[0])
-            jev_status = jev.update(state, captured_at)
+            if args.deterministic:
+                movement_ready = controller.ready_for_target(state, captured_at) if controller else True
+                jev_status = jev.update(state, captured_at, movement_ready=movement_ready)
+            else:
+                jev_status = jev.update(state, captured_at)
             if args.deterministic and jev.choices.mouth_box:
                 mx1, my1, mx2, my2 = jev.choices.mouth_box
                 fh, fw = frame.shape[:2]
@@ -158,15 +162,20 @@ try:
             if args.deterministic and jev.decision:
                 target_x = round(jev.decision.target_x * frame.shape[1])
                 cv2.line(frame, (target_x, 0), (target_x, frame.shape[0]-1), (255, 255, 0), 1)
-                if decision_log is not None:
-                    decision_log.write(json.dumps({
+            if args.deterministic and decision_log is not None:
+                decision_log.write(json.dumps({
                         "session_time": time.monotonic()-recording_started,
                         "choices": asdict(jev.choices),
-                        "selected": jev.decision.id,
-                    }) + "\n")
+                        "selected": jev.decision.id if jev.decision else None,
+                        "active_row": jev.active_track,
+                        "movement_ready": movement_ready,
+                        "motion": controller.motion_status if controller else None,
+                        "previous_motion": controller.previous_motion if controller else None,
+                }) + "\n")
             if controller and jev.enabled:
                 if args.deterministic:
-                    controller.update_target(jev.decision, state, captured_at)
+                    control_state = {**state, "objects": [jev.choices.can] if jev.choices.can else []}
+                    controller.update_target(jev.decision, control_state, captured_at)
                 else:
                     controller.update(jev.decision, state, captured_at)
             cv2.putText(frame, jev_status, (20, 65), cv_font, label_font_scale, box_color, 2)

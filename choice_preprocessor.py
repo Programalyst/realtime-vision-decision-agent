@@ -3,7 +3,8 @@
 Assumptions to calibrate: constant downward speed, mouth-only collision box, linear
 horizontal drags, and no invulnerability. No learned policy or phone I/O here.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from statistics import median
 import math
 
 
@@ -77,6 +78,37 @@ class Choices:
     mouth_box: list[float] | None = None
 
 
+def row_position(track, timestamp):
+    """Vertical row center; larger values are closer to the mouth."""
+    return (track.box[1]+track.box[3])/2 + track.speed*(timestamp-track.seen)
+
+
+def actionable_rows(tracks, timestamp, mouth, config):
+    """Keep hazards, but do not chase missing or already unreachable droplets."""
+    rows = []
+    center = (mouth[0]+mouth[2])/2
+    catch_half = (mouth[2]-mouth[0])/2*config.catch_center_fraction
+    for t in tracks:
+        top = t.box[1]+t.speed*(timestamp-t.seen)
+        if top > mouth[3]+config.vertical_margin:
+            continue
+        if t.kind == 'droplet':
+            if t.seen != timestamp:
+                continue
+            distance = abs((t.box[0]+t.box[2])/2-center)
+            required = max(0, distance-catch_half)
+            arrival = 0.0
+            if required:
+                duration = max(config.min_drag, distance/config.drag_speed)
+                arrival = config.input_delay + duration*required/distance
+            # A missed row must not delay the next catch. This is a kinematic
+            # reachability check; swept collision checks still decide safety.
+            if top+t.speed*arrival > mouth[3]:
+                continue
+        rows.append(t)
+    return rows
+
+
 def mouth_box(can, config):
     """Return the mouth in the same coordinate system as the can box."""
     x1, y1, x2, y2 = can['box']
@@ -103,6 +135,7 @@ class ChoicePreprocessor:
         self.tracks = []
         self.next_id = 1
         self.last_time = None
+        self.can_width = None
 
     def _track(self, objects, timestamp):
         cfg = self.config
@@ -137,7 +170,7 @@ class ChoicePreprocessor:
                 used.add(t.id)
         self.tracks = [t for t in self.tracks if timestamp-t.seen <= cfg.track_ttl]
 
-    def update(self, state, timestamp, extra_targets=()):
+    def update(self, state, timestamp, extra_targets=(), *, row_mode=False, active_track=None):
         if not math.isfinite(timestamp):
             raise ValueError('Timestamp must be finite')
         if self.last_time is not None and timestamp <= self.last_time:
@@ -146,21 +179,55 @@ class ChoicePreprocessor:
         self._track(state['objects'], timestamp)
         cans = [o for o in state['objects'] if o['class'] in ('watering_can', 'disabled_watering_can')]
         can = max(cans, key=lambda o:o['confidence']) if cans else None
-        choices = Choices(timestamp, can, tracks=list(self.tracks))
+        if can is not None:
+            can = {**can, 'box': list(can['box']), 'center': list(can['center'])}
+            left, top, right, bottom = can['box']
+            # A clipped body must not shrink the inferred mouth or shift its offset.
+            if left > .01 and right < .99:
+                self.can_width = right-left
+            elif self.can_width is not None:
+                if left <= .01 and right < .99:
+                    can['box'][0] = right-self.can_width
+                elif right >= .99 and left > .01:
+                    can['box'][2] = left+self.can_width
+                can['center'][0] = (can['box'][0]+can['box'][2])/2
+        # Objects in this game share the same scrolling speed. Use a common
+        # estimate for planning so a newborn track's fallback cannot overtake
+        # an established row. Keep independent measurements in the tracker.
+        tracks = list(self.tracks)
+        if row_mode:
+            measured = [t.speed for t in tracks if t.samples > 1 and t.speed > .01
+                        and t.seen == timestamp]
+            speed = median(measured) if measured else self.config.fallback_fall_speed
+            tracks = [replace(t, speed=speed) for t in tracks]
+        choices = Choices(timestamp, can, tracks=tracks)
         if can is None:
             return choices
         cfg = self.config
+        evaluation_horizon = cfg.horizon
+        if row_mode:
+            mouth = mouth_box(can, cfg)
+            upcoming = actionable_rows(tracks, timestamp, mouth, cfg)
+            focus = max(upcoming, key=lambda t: (row_position(t, timestamp), -t.id),
+                        default=None)
+            if focus is not None:
+                # Re-evaluate when this row clears; do not require staying here
+                # safely through every subsequent row in the one-second window.
+                evaluation_horizon = min(cfg.horizon, max(cfg.input_delay,
+                    (mouth[3]+cfg.vertical_margin-focus.box[1]
+                     -focus.speed*(timestamp-focus.seen))/max(focus.speed, .01)))
         x = can['center'][0]
-        body_half = (can['box'][2]-can['box'][0])/2
         mouth = mouth_box(can, cfg)
         choices.mouth_box = mouth
         half = (mouth[2]-mouth[0])/2
         mouth_offset = (mouth[0]+mouth[2])/2-x
-        low, high = body_half+cfg.margin, 1-body_half-cfg.margin
+        # Spout/body may extend off-screen; constrain the mouth and touch point.
+        low = max(.01, half+cfg.margin-mouth_offset)
+        high = min(.99, 1-half-cfg.margin-mouth_offset)
         if low > high:
             return choices
         targets = [('hold', x), ('evade_left', low), ('evade_right', high)]
-        for t in self.tracks:
+        for t in tracks:
             tx = (t.box[0]+t.box[2])/2
             if t.kind == 'droplet' and t.seen == timestamp:
                 targets.append((f'catch_{t.id}', max(low, min(high, tx-mouth_offset))))
@@ -177,15 +244,15 @@ class ChoicePreprocessor:
         def duration_for(distance):
             return max(cfg.min_drag, distance/cfg.drag_speed) if distance > .003 else 0.0
 
-        def evaluate(segments):
+        def evaluate(segments, horizon=evaluation_horizon):
             collision, catches = None, {}
-            for t in self.tracks:
+            for t in tracks:
                 age = timestamp-t.seen
                 box = t.box
                 tx = (box[0]+box[2])/2
                 top, bottom = box[1]+t.speed*age, box[3]+t.speed*age
                 for start, stop, intercept, vx in segments:
-                    stop = min(stop, cfg.horizon)
+                    stop = min(stop, horizon)
                     if start > stop:
                         continue
                     padding = cfg.vertical_margin if t.kind == 'bomb' else 0.0
@@ -214,12 +281,18 @@ class ChoicePreprocessor:
             if duration:
                 velocity = (target-x)/duration
                 approach.append((delay, end, x-velocity*delay, velocity))
-            segments = approach + [(end, cfg.horizon, target, 0)]
-            collision, catches = evaluate(segments)
+            # Never truncate safety checks before the command can finish and
+            # another observation/decision can respond to a following bomb.
+            horizon = (max(evaluation_horizon, end+cfg.replan_allowance)
+                       if row_mode else cfg.horizon)
+            segments = approach + [(end, horizon, target, 0)]
+            collision, catches = evaluate(segments, horizon)
             catch_id = min(catches, key=catches.get) if catches else None
             catch = catches.get(catch_id)
             choices.candidates.append(Candidate(name,target,duration,distance,collision,catch,
                                                 catch_count=len(catches), catch_track_id=catch_id))
+            if row_mode:
+                continue
             if catch is None or (collision is not None and collision <= catch):
                 continue
             # Complete the first drag and allow a catch + fresh observation before escape.

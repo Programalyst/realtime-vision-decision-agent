@@ -1,5 +1,5 @@
 """Deterministic choice policy, independent of YOLO, SDKs, and Android."""
-from choice_preprocessor import ChoicePreprocessor
+from choice_preprocessor import ChoicePreprocessor, row_position, actionable_rows
 
 
 def select_candidate(choices):
@@ -16,56 +16,81 @@ def select_candidate(choices):
 
 
 class DeterministicController:
+    """One stable destination per incoming row; continuous observation and safety checks."""
+
     def __init__(self, config=None):
         self.preprocessor = ChoicePreprocessor(config)
         self.enabled = False
         self.decision = None
         self.choices = None
-        self.pending_escape = None
+        self.active_track = None
+        self.target_x = None
 
     def set_enabled(self, enabled):
         self.enabled = enabled
         self.decision = None
         self.preprocessor.reset()
-        self.pending_escape = None
+        self.active_track = self.target_x = None
 
-    def update(self, state, captured_at):
-        extra = [('scheduled_escape', self.pending_escape['target'])] if self.pending_escape else []
-        self.choices = self.preprocessor.update(state, captured_at, extra_targets=extra)
-        self.decision = select_candidate(self.choices) if self.enabled else None
-        if self.enabled and self.pending_escape and self.choices.can:
-            pending = self.pending_escape
-            if captured_at >= pending['command_at']:
-                direct = [c for c in self.choices.candidates
-                          if c.escape_target_x is None and c.safe
-                          and abs(c.target_x-pending['target']) < .003]
-                arrived = abs(self.choices.can['center'][0]-pending['target']) < .015
-                if arrived or captured_at > pending['command_at']+.6 or not direct:
-                    self.pending_escape = None
-                else:
-                    # Recheck the escape against new bombs before issuing it.
-                    self.decision = min(direct, key=lambda c:c.distance)
-            elif self.decision and self.decision.catch_track_id != pending['track']:
-                # Keep a safe approach to the original catch until the escape deadline.
-                same_catch = [c for c in self.choices.candidates if c.safe
-                              and c.catch_track_id == pending['track']]
-                if same_catch:
-                    self.decision = min(same_catch, key=lambda c:(c.catch_at,c.distance))
-                else:
-                    self.pending_escape = None
-        if (self.enabled and self.decision and self.decision.escape_target_x is not None
-                and self.pending_escape is None):
-            self.pending_escape = {
-                'target': self.decision.escape_target_x,
-                'command_at': captured_at+self.decision.escape_at-self.preprocessor.config.input_delay,
-                'track': self.decision.catch_track_id,
-            }
+    def update(self, state, captured_at, movement_ready=True):
+        extras = [('row_target', self.target_x)] if self.target_x is not None else []
+        self.choices = self.preprocessor.update(state, captured_at, extras,
+                                               row_mode=True, active_track=self.active_track)
+        self.decision = None
         if not self.enabled:
             return 'Rules: PAUSED - press J to start'
-        if self.decision is None:
+        if not self.choices.can:
             return 'Rules: waiting for can'
-        risk = 'safe' if self.decision.safe else 'NO SAFE MOVE'
-        return f'Rules: {self.decision.id} x={self.decision.target_x:.2f} {risk}'
+        cfg = self.preprocessor.config
+        mouth = self.choices.mouth_box
+        upcoming = actionable_rows(self.choices.tracks, captured_at,
+                                   mouth, cfg)
+        if not upcoming:
+            self.active_track = self.target_x = None
+            return 'Rules: waiting for next row'
+        # Rows cannot overtake one another. Velocity estimates must not reorder
+        # them, including when a previously missed lower object reappears.
+        current = max(upcoming, key=lambda t: (row_position(t, captured_at), -t.id))
+        if current.id != self.active_track:
+            self.active_track, self.target_x = current.id, None
+        if not movement_ready:
+            return f'Rules: row {current.id} {current.kind} - waiting for drag/fresh frame'
+        candidates = self.choices.candidates
+        safe = [c for c in candidates if c.safe]
+        x = self.choices.can['center'][0]
+        offset = (mouth[0]+mouth[2])/2-x
+        if current.kind == 'droplet':
+            desired = (current.box[0]+current.box[2])/2-offset
+            # Align with this row even before it enters the catch horizon.
+            if safe:
+                best = min(safe, key=lambda c:(abs(c.target_x-desired),c.distance))
+            else:
+                best = select_candidate(self.choices)
+        else:
+            following = [t for t in upcoming if t.kind == 'droplet' and row_position(t, captured_at) < row_position(current, captured_at)]
+            next_drop = max(following, key=lambda t: row_position(t, captured_at)) if following else None
+            preferred = ((next_drop.box[0]+next_drop.box[2])/2-offset) if next_drop else x
+            # Clear the current bomb while preparing for the next reachable drop.
+            half = (mouth[2]-mouth[0])/2
+            def clear(c):
+                center = c.target_x+offset
+                return (center+half+cfg.margin < current.box[0]
+                        or center-half-cfg.margin > current.box[2])
+            escapes = [c for c in safe if clear(c)]
+            # Pre-align with the next droplet whenever the entire move is
+            # safe. Holding/minimal dodges used to waste this available time.
+            if next_drop is not None and escapes:
+                best = min(escapes, key=lambda c: (abs(c.target_x-preferred), c.distance))
+            else:
+                best = min(escapes, key=lambda c: c.distance, default=None)
+            if best is None:
+                best = select_candidate(self.choices)
+        self.decision = best
+        if best is None:
+            return 'Rules: no candidate'
+        self.target_x = best.target_x
+        risk = 'clear' if best.safe else 'NO SAFE MOVE'
+        return f'Rules: row {current.id} {current.kind} x={best.target_x:.2f} {risk}'
 
     def close(self):
         pass

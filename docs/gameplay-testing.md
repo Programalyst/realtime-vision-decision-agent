@@ -122,3 +122,88 @@ YOLO validation metrics from live gameplay performance. Claim only observed
 results; the current changes await live testing. Keep API keys out of screenshots
 and shared notebook/code outputs. Videos and session logs remain local under the
 Git-ignored `runs/` directory; publish selected artifacts separately if desired.
+
+## Row-based refinement after the 20260921-092451-330568 run
+
+Review found two bomb hits, around 12.5 s and 21.3 s. Decision-log rows arrived
+at a median interval of about 39 ms; requested swipes had a median duration of
+80 ms, while submission-to-observed-completion was about 227 ms. These logs
+included polling and do not establish exact physical travel time.
+
+The new policy retains the next incoming row: align for droplets; for bombs,
+stay clear or dodge toward the next droplet. It replaces live multi-step escape
+scheduling. Tracking continues during drags, but new decisions wait for command
+completion and two fresh, sufficiently stable can-position observations. Logs
+now capture busy/settling frames as well as proposals. `completed_at` for new
+runs is measured when the ADB call returns, unlike older polling timestamps.
+
+This version passed 33 offline tests but regressed in the next live run below.
+The former rows above remain historical results, not results for this policy.
+
+
+## Regression review: 20260921-094536-204705
+
+The user reported more bomb hits and missed droplets. At 4.744 s, the log
+selected bomb track 7 above droplet track 5. Independent velocity estimates
+incorrectly let a higher row preempt the lower one. Footage around 5 s shows
+the resulting premature dodge away from the droplet. Median command
+submission-to-ADB-return time was about 191 ms; the additional two-observation
+settling gate further delayed opportunities to correct or dodge.
+
+Corrections order rows by vertical center, use a common median measured falling
+speed for row-mode predictions, and allow replanning on the first observation
+after ADB completion. Tracking and safety checks continue on every processed
+frame. Reacquired lower objects take priority. Jev's policy remains unchanged.
+Replaying the recorded detections at 4.744–5.131 s now selects droplet track 5
+and its center-aligned target instead of bomb track 7. This validates that
+selection change, not counterfactual gameplay outcomes.
+
+**Next action:** test the corrected deterministic controller before changing Jev.
+Device capture latency and physical drag arrival time remain unmeasured.
+
+
+## Screenshot review: images/troubleshoot_1
+
+Reviewed only the five supplied screenshots, not the recording. They show a
+bomb collision and consecutive missed droplets. Still frames cannot establish
+exact command latency, velocity, or the complete sequence of requested moves.
+The cyan destination lines in screenshots 1–2 lie left of the detected can.
+
+Code review exposed three additional policy defects: bomb handling preferred a
+minimal dodge/hold over safe preparation for a following droplet; missing
+caught/missed droplets could retain priority for the tracking TTL; safety checks
+could end at row clearance while a drag was still in progress.
+
+The controller now prefers safe alignment toward the next reachable droplet,
+excludes missing and kinematically unreachable droplets from row objectives,
+and checks collisions through the entire drag plus the replanning allowance.
+Bombs retain their tracking grace period. A missing droplet can become an
+objective again if redetected and reachable. Velocity and tick-rate settings
+were not changed. Forty offline tests pass, including approximate screenshot-1
+geometry, missing/unreachable droplet handoff, and a collision after the previous
+safety cutoff. These are policy regressions, not a simulation of the actual run.
+Live validation remains pending; Jev's policy is unchanged.
+
+
+## Offline perfect-run reference
+
+`replayDeterministic.py` replays the matching cached detections alongside the
+human video, with no phone or Jev connection. Initial reference:
+`runs/video/20260919-235017-767116/annotated-h264.mp4`, source 5–35.5 s.
+Output: `runs/replay/perfect-run-reference/` (ignored by Git).
+
+915 frames were processed, all with a detected can. Ten frames had no
+predicted-safe choice, grouped at 8.541 s, 15.702–15.803 s, and
+16.447–16.565 s. These are useful collision/latency calibration cases against
+the user's successful run, not ten measured or simulated hits. The planner
+assumes an initially stationary can during input delay; the human can may
+already be moving. Detector boxes and conservative collision margins also need
+checking before interpreting these flags as controller mistakes.
+
+The shadow video displays actual human mouth geometry and proposed targets;
+JSONL captures the full candidate states, and CSV lists row/safety transitions.
+The replay does not feed proposed positions back into gameplay, and cannot
+measure the controller's hypothetical score or verify ADB responsiveness.
+Forty-two tests pass, including missing-frame timestamp interpolation and
+rejection of invalid timestamp order. No live policy tuning was done from this
+reference run alone.

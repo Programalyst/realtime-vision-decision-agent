@@ -223,4 +223,5 @@ __marimo__/
 /Collect-Raindrops-*/
 /runs/
 *.pt
+/images/troubleshoot_1/
 !/models/raindrops-yolo11n-v3.pt
