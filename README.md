@@ -6,17 +6,21 @@ A vision pipeline for playing Lazada's raindrop-collection game. A custom
 YOLO11n model detects droplets, bombs, and the watering can, providing object
 positions for deterministic or Jev-driven game control.
 
-**Current status:** the v3 detector and both control modes have been exercised in
-live gameplay. The deterministic planner uses full-width moves, mouth-centered geometry, and a stable
-row-by-row policy. The latest live run exposed row-ordering and control-delay regressions. Corrections
-have passed offline tests and await a new live session. Both detection scripts use `models/raindrops-yolo11n-v3.pt` at confidence
-**0.25**.
+**Current status:** YOLO v3 is working; gameplay control remains experimental.
+The previous deterministic run collected **342 ml** with one visible bomb hit.
+The latest deterministic implementation separates unique-frame observation,
+command-aware state estimation, and timed execution. It is tested offline and
+awaits device calibration and live validation. See the
+[current implementation](docs/deterministic-execution.md).
+Both detection scripts use `models/raindrops-yolo11n-v3.pt` at confidence **0.25**.
+The GIF above shows an earlier deterministic implementation.
 
 The initial Jev run hit three bombs. A later deterministic run with full-width
 moves and catch-and-escape planning hit one bomb and collected more droplets,
 according to manual observation. These are individual runs with evolving
 controllers, not a controlled benchmark. See the [test plan and results log](docs/gameplay-testing.md)
-for the next deterministic/Jev trials and evidence to collect before sharing results.
+for historical trials and evidence to collect before sharing results. Current
+work focuses on learned perception with deterministic gameplay decisions.
 
 ## Architecture
 
@@ -27,11 +31,13 @@ flowchart LR
     Video[Recorded gameplay] --> YOLO
     YOLO --> Objects[Classes, confidence, boxes and centers]
     Objects --> Preview[Live preview / annotated video / CSV]
-    Objects --> Planner[Motion estimates and candidate paths]
+    Objects --> Planner[Motion estimates and rolling schedules]
     Planner --> Rules[Deterministic selection]
-    Rules --> Control
-    Objects --> Jev[Jev: snapshot-based choice]
-    Jev --> Control[ADB drag: optional]
+    Rules --> Executor[Timed executor: ADB or optional held touch]
+    Executor --> Phone
+    Planner --> Jev[Jev: future schedule choice]
+    Jev --> Local[Retained plan and local safety]
+    Local --> Control[ADB drag: optional]
     Control --> Phone
 ```
 
@@ -43,8 +49,8 @@ flowchart LR
 | Ultralytics YOLO + PyTorch | Train and run the custom object detector |
 | Roboflow | Annotate images and version the training dataset |
 | OpenCV + PyAV | Process frames, display predictions, and encode H.264 video |
-| Local planner | Motion estimation, mouth collisions, catch-and-escape choices |
-| Typesafe AI Jev | Optional left/right/hold decisions from detected objects |
+| Local planner | Motion estimation, mouth collisions, rolling schedule generation/execution |
+| Typesafe AI Jev | Optional future schedule selection; hybrid local execution |
 
 ## Model and results
 
@@ -140,66 +146,46 @@ uv run python testYolo.py --deterministic --control
 
 This mode is mutually exclusive with `--jev`. Both modes start paused; focus the
 preview and press **J** to start/pause. Deterministic sessions record to
-`runs/deterministic/<timestamp>/annotated.mp4`, with a `decisions.jsonl` file
-containing tracks, candidate metrics, and each selected choice. A cyan vertical
-line marks the proposed destination. Logged choices are proposals, not confirmation
-that Android executed them: while a drag is running, new proposals are not queued.
+`runs/deterministic/<timestamp>/annotated.mp4`, with `decisions.jsonl` containing
+observations, state estimates, plan versions, timed actions, and execution events.
+The cyan line marks the proposed mouth-center destination.
 
-The logic is separated for review:
+The live deterministic implementation is separated for review:
 
-- **`choice_preprocessor.py`** tracks falling objects and estimates their speeds,
-  reconstructs the mouth geometry, generates full-width destinations, and checks
-  swept-box collisions. Live row mode uses the median measured falling speed
-  across visible tracked objects, consistent with rows scrolling together. In live row mode it evaluates safety through the current
-  row's clearance (up to the one-second horizon), extended when needed to cover
-  the entire drag plus the replanning allowance. Safety checks include all tracked bombs.
-- **`deterministic_controller.py`** retains the next incoming row as its objective.
-  For droplets, it aligns the mouth with the droplet center. Missing or
-  kinematically unreachable droplets are skipped as objectives. For bombs, it
-  prefers safe alignment toward the next reachable droplet, otherwise the
-  shortest safe clearance move. Rows are ordered by vertical position, never by independently estimated
-  arrival times; a newly reacquired lower object takes priority. If no move
-  is predicted safe, it selects the candidate delaying collision longest.
+- **`frame_observer.py`** consumes unique decoded frames through a latest-frame mailbox.
+- **`motion_estimator.py`** projects delayed observations using command history.
+- **`rolling_planner.py`** searches collect/skip/dodge routes across visible rows.
+- **`deterministic_runtime.py`** validates retained plans and revises future actions.
+- **`timed_executor.py`** executes versioned schedules independently of inference.
+- **`scrcpy_drag.py`** provides an optional persistent-touch transport.
 
-The policy is event-driven, not a fixed tick synchronized to game spawns. It
-observes every processed frame but keeps a stable row identity and dodge target.
-Once that object passes the mouth, or a droplet disappears or becomes
-unreachable under the motion estimate, it advances to the next row. Missing
-bombs remain tracked briefly for safety; missing droplets can be selected again
-if detected and still reachable. This relies on the game's one-object-per-row pattern. The older
-catch-and-escape candidate generator is retained in the preprocessor for offline
-experiments; the live row controller no longer schedules those sequences.
+Only one movement executes at a time. Valid plans retain their deadlines; future
+steps can execute between observations. A replaced plan cannot resend consumed
+action IDs, and stale schedules expire instead of draining old commands.
+A missing can or stalled observation stream suppresses further control.
 
-Only one Android drag runs at a time. During a drag, tracking continues but the
-planner emits no movement decision. After the ADB call returns, the first
-subsequent observation containing the can permits replanning, without an extra
-position-stability wait. A completed command is never assumed to have reached
-its requested position. Fresh detections determine any needed correction.
-Frame timestamps record retrieval from the stream, not device capture time,
-so stream buffering can still delay feedback.
-
-Default estimated drag speed is **3 screen widths/second**, with a minimum drag
-duration of 80 ms and an input-delay estimate of 80 ms. The reviewed run showed
-80 ms requested drags but about 227 ms median submission-to-observed-completion
-time, so these timing assumptions still need live calibration:
+The default transport is ADB, with an estimated input delay of 80 ms, minimum
+swipe of 80 ms, and desired drag speed of 3 screen widths/second. The estimator
+initially assumes **120 ms phone-to-decode delay**, with 40 ms timing uncertainty.
+These are calibration assumptions, not measured guarantees. Decode timestamps
+do not establish device capture time. Background search runs every 150 ms;
+new observations validate the plan and trigger urgent replanning when needed.
 
 ```bash
-uv run python testYolo.py --deterministic --control --drag-speed 3 --input-delay 0.08
+uv run python testYolo.py --deterministic --control --feedback-delay 0.12
 ```
 
-The planner assumes vertical constant-speed falling objects, linear horizontal
-drags, and a stationary mouth height. A disabled can is treated as vulnerable.
-These estimates can fail with missing detections, track association errors,
-rendering delay, or different game physics. No perfect-play guarantee is implied.
-Missing-can frames suppress control; observations older than 250 ms are not
-executed. J resets the active row and tracks.
+An opt-in `--input-transport scrcpy` uses one held touch with streamed MOVE events.
+Its game-specific touch behavior and latency require separate live calibration.
+See [timed execution and diagnostics](docs/deterministic-execution.md) and the
+[design rationale](docs/deterministic-timing-design.md).
 
-Session JSONL includes `active_row`, `movement_ready`, nullable `selected`, and
-motion snapshots even while the executor is busy. For deterministic drags,
-`completed_at` now marks when the ADB call returned in the worker, not when the
-main loop noticed completion. It is not a measured physical arrival time.
+The previous `DeterministicController`, `ConditionalController`, and their tests
+remain for historical comparisons. Jev retains its existing policy and executor;
+it has not been migrated to the new deterministic runtime.
 
-To inspect decisions without spending a live attempt, replay an existing
+To inspect the **historical observation-driven controller** without spending a
+live attempt, replay an existing
 `testYoloVideo.py` export and its matching `detections.csv`:
 
 ```bash
@@ -222,9 +208,9 @@ errors still apply. Use the JSONL to inspect every proposal and the events CSV
 to find row/safety transitions. Live testing remains necessary to establish
 actual catches and collisions.
 
-The Jev mode retains its original left/right/hold policy and fixed steps. It does
-not yet consume these preprocessed candidates. Test the deterministic refinement
-first, then proceed to the Jev integration and separate test run.
+Jev selects future schedules using the preceding rolling runner and target-drag
+executor. Current validation focuses on the new deterministic runtime.
+See [Jev policy design](docs/jev-policy.md) for request state and response validation.
 
 ### Mouth hitbox calibration
 
@@ -254,7 +240,16 @@ block a move merely because they overlap the body. Screen-edge constraints now k
 the body/spout to extend beyond the edge. An unclipped observed can width is
 retained to reconstruct the mouth when later detections are clipped at an edge. These screenshot-derived fractions are an initial calibration;
 verify them across normal/disabled appearances and against actual collisions.
-The existing Jev snapshot policy is unchanged.
+The dynamic Jev policy uses this same geometry.
+
+### Rolling schedules (earlier 22 September update)
+
+The former two-object conditional planner held escape destinations too long.
+That version introduced planning across visible rows, retaining intervening
+droplets. The route-search builder remains shared, while live deterministic
+execution now uses the independent timed runtime. Jev mode is explicitly hybrid: local startup, repairs, and
+safety handling continue when no valid Jev plan is available. Live validation
+is pending; see [design and offline results](docs/rolling-schedules.md).
 
 ## Jev decisions and drag control
 
@@ -306,23 +301,24 @@ phone frame; slow inference can still make motion look choppy. Encoding uses an
 ultrafast H.264 preset to limit overhead. Session files are ignored by Git under
 `runs/`.
 
-Jev control uses an 8%-of-screen-width step over 120 ms. It is an
-initial controller to tune against the actual game, not a calibrated collision
-planner. Each drag releases the touch before the next decision.
+Jev receives independent `jev-latest` requests containing future schedule choices
+(`plan_1`, etc.), ordered steps, expected catches, travel, and timing estimates.
+No conversation history or screenshots are sent. Python retains the selected
+plan and executes its remaining steps locally, revalidating on each fresh frame.
 
-Only structured detections (classes, confidence, normalized boxes and centers)
-are sent to the TypeSafe API, not screenshots. Jev chooses `left`, `right`, or
-`hold` using `jev-latest`. Requests run in the background with at most one in
-flight, at most once per 0.5 seconds (`--jev-interval` changes this). The preview
-shows the recommendation, confidence, and observed request latency. API use may
-consume account credits.
+The default `--jev-lead 0.65` reserves API response time; recent latency can
+increase that lead. `--jev-interval 0.5` sets minimum request spacing and
+`--jev-max-age 2` is an outer reply-age limit. At most one request is in flight.
+Requests may overlap a drag; returned plans wait for a suitable activation point.
+Rows passing during a request do not automatically invalidate the remaining plan.
 
-Decisions older than 1.5 seconds are discarded; missing-can frames suppress
-movement. API failures pause requests for five seconds. No SDK retries are made
-for an old snapshot. The initial policy uses one snapshot, without velocity
-estimation or a persistent disabled-state timer, so evaluate its decisions before
-relying on autonomous play. No live API or phone-control validation is included
-in the offline tests.
+Local fallback and safety actions keep the controller active when Jev is pending
+or a reply cannot be used. This is **hybrid control**, not a pure model benchmark.
+`decisions.jsonl` records `sequence.source`, replies queued for consideration,
+accepted/rejected plan activations, local repairs, and API latency. A queued
+reply is not proof of execution. API use may consume account credits.
+See [Jev policy design](docs/jev-policy.md) and
+[repeatable offline timing tests](docs/rolling-schedules.md).
 
 ## Record gameplay
 
@@ -444,9 +440,13 @@ both detection scripts when promoting a model.
 
 | Path | Purpose |
 | --- | --- |
+| `jev_policy.py` | Dynamic Jev request construction, response validation, and API timing |
 | `testYolo.py` | Live detection, deterministic/Jev modes, drag control, and J-toggle recording |
 | `choice_preprocessor.py` | Object motion estimates, candidate paths, and predicted outcomes |
-| `deterministic_controller.py` | Local candidate selection and escape scheduling |
+| `deterministic_runtime.py`, `timed_executor.py` | Retained routes and independent deadline execution |
+| `frame_observer.py`, `motion_estimator.py` | Unique frames and command-aware state estimates |
+| `deterministic_controller.py` | Historical controller for shadow replay |
+| `simulateDeterministic.py`, `analyzeControlTiming.py` | Synthetic timing tests and offline delay fitting |
 | `video_writer.py` | Shared H.264 encoder for replay and live session recordings |
 | `jev_agent.py` | Background API requests, state conversion, and drag controller |
 | `testYoloVideo.py` | Recorded-video detection, H.264 export, and CSV export |
@@ -468,19 +468,17 @@ Run the offline checks without a phone or API key:
 uv run python -m unittest discover -s tests -v
 ```
 
-The current 33 tests cover geometry, center alignment, movement correction,
-tracking, catch/escape feasibility, pause/stale-response handling, SDK request
-formatting with a mock transport, drag coordinates, and H.264 timing. They do not
-establish real-game collision accuracy or end-to-end control latency.
+The 82 tests cover geometry, route planning, delayed observations, timed execution,
+queue replacement, pause/expiry, input transport, SDK serialization, and video
+encoding. The new synthetic fixture sweeps frame rates and feedback delays;
+it does not establish real-game collision accuracy or live scores.
 
-Next: test the updated deterministic controller when attempts refresh, then run
-Jev again. Follow the [gameplay test plan](docs/gameplay-testing.md) to record the
-code revision, settings, final water total, bomb hits, and timestamped misses.
-Jev currently receives detections, not the deterministic planner's candidate
-sequences; this comparison evaluates the two complete pipelines. Connecting Jev
-to the same preprocessed choices is a separate future experiment.
+Next: calibrate and test deterministic control. Record the code revision, timing
+settings, final water total, bomb hits, and timestamped misses. See the
+[current execution guide](docs/deterministic-execution.md) and
+[historical gameplay log](docs/gameplay-testing.md).
 
-### Current deterministic refinement: edge reach
+### Geometry retained from earlier refinements
 
 The previous full-body boundary kept the can center roughly 23% away from screen
 edges in the latest recording, preventing alignment with some edge droplets.
@@ -489,12 +487,10 @@ geometry from an unclipped can observation if the body later clips off-screen.
 This assumes the game permits that movement; physical game limits still need
 verification. Start from a visible, unclipped can when possible.
 
-After a drag completes, the executor waits for a newly captured observation before
-sending a correction. Deterministic session logs also include `motion` and
-`previous_motion`: commanded endpoints/duration, the time the ADB command returned,
-and observed position error when available. These fields are polled snapshots,
-not a complete command-event trace; `started_at` marks submission to the worker.
+The new timed executor accounts for command history while observations are in
+flight. Its dispatch/return events and estimator timestamps supersede the old
+`motion`/`previous_motion` snapshots for live deterministic diagnosis.
 
 **Test order:** run this deterministic refinement first and review the recording.
-Only after that test will Jev be connected to dynamic preprocessed choices, then
-receive its own live test. Jev currently retains its original three choices.
+The current focus is deterministic control: calibrate the timing model and
+validate the independent executor before making further performance claims.

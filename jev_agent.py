@@ -1,10 +1,8 @@
 """Nonblocking Jev decisions from YOLO detections; no device control."""
 from concurrent.futures import ThreadPoolExecutor
-import math
-import os
 import time
 
-from typesafe_sdk import Choice, RetryPolicy, TypeSafeClient
+from jev_policy import JevAgent
 
 
 def detection_state(result):
@@ -23,90 +21,6 @@ def detection_state(result):
         })
     return {"coordinates": "Normalized 0..1; x increases right, y increases downward.",
             "objects": objects}
-
-
-class JevAgent:
-    def __init__(self, interval=0.5, max_age=1.5, client=None):
-        if not all(math.isfinite(v) and v > 0 for v in (interval, max_age)):
-            raise ValueError("Jev interval and max age must be positive finite seconds")
-        self.client = client or TypeSafeClient(
-            api_key=os.environ.get("JEV_API_KEY") or os.environ.get("TYPESAFE_API_KEY"),
-            model="jev-latest", timeout=3.0, retry=RetryPolicy(max_retries=0)
-        )
-        self.executor = ThreadPoolExecutor(max_workers=1)
-        self.interval, self.max_age = interval, max_age
-        self.future = None
-        self.next_request = 0.0
-        self.sent_at = 0.0
-        self.decision = None
-        self.enabled = True
-        self.enabled_at = 0.0
-        self.status = "Jev: waiting for can"
-        self.question = Choice(
-            instructions=(
-                "Choose the watering can's immediate horizontal movement in a falling-object game. "
-                "Collect droplets (single and double sprites are the same class) and avoid bombs. "
-                "Objects fall downward. Prioritize nearby objects above the can, especially bombs "
-                "near its path. Ignore objects already below the can. Compare bounding boxes as "
-                "well as centers. Choose hold when aligned with a safe droplet, no can is visible, "
-                "or movement is not justified. A disabled can is flashing after a bomb hit; do not "
-                "assume it is invulnerable. This is one snapshot: velocity and future spawns are unknown."
-            ),
-            criteria={"left": "Move the can left.", "right": "Move the can right.",
-                      "hold": "Keep the can at its current horizontal position."},
-        )
-
-    def set_enabled(self, enabled):
-        self.enabled = enabled
-        self.enabled_at = time.monotonic()
-        self.decision = None
-        self.status = "Jev: waiting for can" if enabled else "Jev: PAUSED - press J to start"
-
-    def update(self, state, captured_at):
-        if not self.enabled:
-            return self.status
-        now = time.monotonic()
-        if self.future is not None and self.future.done():
-            try:
-                answer = self.future.result().choices["movement"]
-                if answer.choice not in ("left", "right", "hold"):
-                    raise ValueError("Unexpected movement choice")
-                latency = now - self.sent_at
-                if self.observed_at < self.enabled_at:
-                    self.decision = None
-                    self.status = "Jev: pre-pause response discarded"
-                elif now - self.observed_at <= self.max_age:
-                    self.decision = (answer.choice, float(answer.confidence), self.observed_at)
-                    self.status = f"Jev: {answer.choice} {answer.confidence:.2f} | {latency * 1000:.0f}ms"
-                else:
-                    self.decision = None
-                    self.status = "Jev: stale response discarded"
-            except Exception as error:
-                # Do not print exception bodies: they may contain request/auth details.
-                self.decision = None
-                self.status = f"Jev: {type(error).__name__}; retry in 5s"
-                self.next_request = now + 5.0
-            self.future = None
-        if self.decision and now - self.decision[2] > self.max_age:
-            self.decision = None
-            self.status = "Jev: decision expired"
-        has_can = any(o["class"] in ("watering_can", "disabled_watering_can")
-                      for o in state["objects"])
-        if not has_can:
-            self.decision = None
-            self.status = "Jev: waiting for can"
-        if (has_can and self.future is None and now >= self.next_request
-                and captured_at >= self.enabled_at and now - captured_at <= self.max_age):
-            self.sent_at, self.observed_at = now, captured_at
-            self.future = self.executor.submit(
-                self.client.system_one, state=state, questions={"movement": self.question}
-            )
-            self.next_request = now + self.interval
-        return self.status
-
-    def close(self):
-        self.executor.shutdown(wait=True, cancel_futures=True)
-        self.client.close()
 
 
 class DragController:

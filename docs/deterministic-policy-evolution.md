@@ -1,6 +1,17 @@
 # Deterministic controller: strategy changes and policy design
 
-Status as of 21 September 2026. The main change was replacing predictive
+**Latest update:** [rolling visible-row schedules](rolling-schedules.md) now replace
+the two-object conditional planner in live deterministic control. Jev chooses
+future schedules with local execution/fallback. The comparisons below are historical.
+
+Historical comparison as of 21 September 2026.
+
+**22 September update:** the deterministic controller now has a conditional
+sequence layer again, including dodge/wait/return and catch/escape. See
+[conditional sequence design](conditional-sequences.md). The comparison below
+describes the preceding row-only version.
+
+ The main change was replacing predictive
 **catch-then-escape planning** with a policy focused on the **next incoming row**.
 This was a change in strategy, not just a change in decision frequency.
 
@@ -150,13 +161,15 @@ the row policy outperforms the earlier sequence policy.
 
 ## How Jev fits into the policy layer
 
-Jev is still using its original left/right/hold policy and fixed steps. It has
-not yet been migrated to the deterministic candidate preprocessor.
+At the time of the earlier comparison, Jev used left/right/hold with fixed
+steps. It has since been connected to the row-mode candidate preprocessor;
+see [Jev policy design](jev-policy.md). The new integration is tested offline
+and awaits live validation.
 
-A proposed integration would let Python calculate destinations such as “align
+The integration lets Python calculate destinations such as “align
 with next droplet,” “dodge left,” “dodge right,” and “hold,” including timing and
-risk information. Jev would choose an action; Python would execute the precise
-drag. Jev would not need to calculate pixels or movement percentages.
+risk information. Jev chooses an action; Python executes the precise drag after revalidating it.
+Jev does not need to calculate pixels or movement percentages.
 
 If preprocessing already leaves one clearly preferable action, this gives Jev
 little substantive work and adds API latency. Its value would need to come from

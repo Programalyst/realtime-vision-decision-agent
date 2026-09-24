@@ -19,7 +19,7 @@ class PlannerConfig:
     vertical_margin: float = 0.004  # Separate bomb padding; do not inflate the shallow mouth.
     catch_center_fraction: float = 0.25  # Droplet center must enter central 25% of mouth width.
     min_drag: float = 0.08
-    catch_settle: float = 0.05  # wait after predicted mouth contact
+    catch_settle: float = 0.02  # wait after predicted mouth contact
     replan_allowance: float = 0.12  # inference/control turnaround before escape
 
     # Fractions within YOLO's whole-can box, from the user-marked screenshot.
@@ -47,6 +47,9 @@ class Track:
     seen: float
     speed: float
     samples: int = 1
+    # Vertical expansion applied to a bomb box by MotionEstimator (screen height).
+    # Keep it separate so hold timing can recover the unpadded detector edge.
+    timing_padding: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -124,6 +127,43 @@ def overlap_interval(position, velocity, radius, start, end):
     a, b = sorted(((-radius-position)/velocity, (radius-position)/velocity))
     a, b = max(start, a), min(end, b)
     return (a, b) if a <= b else None
+
+
+def evaluate_trajectory(choices, cfg, segments, horizon):
+    """Check piecewise-linear body-center motion against all tracked objects.
+
+    Segments are (start, stop, x_intercept, x_velocity), relative to observation.
+    """
+    mouth = choices.mouth_box
+    half = (mouth[2]-mouth[0])/2
+    mouth_offset = (mouth[0]+mouth[2])/2-choices.can['center'][0]
+    collision, catches = None, {}
+    for t in choices.tracks:
+        age = choices.timestamp-t.seen
+        box = t.box
+        tx = (box[0]+box[2])/2
+        top, bottom = box[1]+t.speed*age, box[3]+t.speed*age
+        for start, stop, intercept, vx in segments:
+            stop = min(stop, horizon)
+            if start > stop:
+                continue
+            padding = cfg.vertical_margin if t.kind == 'bomb' else 0.0
+            yi = overlap_interval((top+bottom-mouth[1]-mouth[3])/2,
+                                  t.speed, (mouth[3]-mouth[1]+bottom-top)/2+padding,
+                                  start, stop)
+            # Bombs use full box overlap. Catches require center alignment,
+            # independent of sprite width (single or double droplet).
+            radius_x = (half+(box[2]-box[0])/2+cfg.margin if t.kind == 'bomb'
+                        else half*cfg.catch_center_fraction)
+            xi = overlap_interval(tx-intercept-mouth_offset, -vx,
+                                  radius_x, start, stop)
+            if yi and xi and max(yi[0],xi[0]) <= min(yi[1],xi[1]):
+                contact = max(yi[0],xi[0])
+                if t.kind == 'bomb':
+                    collision = contact if collision is None else min(collision, contact)
+                elif t.seen == choices.timestamp and t.speed > .01:
+                    catches[t.id] = min(catches.get(t.id, math.inf), contact)
+    return collision, catches
 
 
 class ChoicePreprocessor:
@@ -245,33 +285,7 @@ class ChoicePreprocessor:
             return max(cfg.min_drag, distance/cfg.drag_speed) if distance > .003 else 0.0
 
         def evaluate(segments, horizon=evaluation_horizon):
-            collision, catches = None, {}
-            for t in tracks:
-                age = timestamp-t.seen
-                box = t.box
-                tx = (box[0]+box[2])/2
-                top, bottom = box[1]+t.speed*age, box[3]+t.speed*age
-                for start, stop, intercept, vx in segments:
-                    stop = min(stop, horizon)
-                    if start > stop:
-                        continue
-                    padding = cfg.vertical_margin if t.kind == 'bomb' else 0.0
-                    yi = overlap_interval((top+bottom-mouth[1]-mouth[3])/2,
-                                          t.speed, (mouth[3]-mouth[1]+bottom-top)/2+padding,
-                                          start, stop)
-                    # Bombs use full box overlap. Catches require center alignment,
-                    # independent of sprite width (single or double droplet).
-                    radius_x = (half+(box[2]-box[0])/2+cfg.margin if t.kind == 'bomb'
-                                else half*cfg.catch_center_fraction)
-                    xi = overlap_interval(tx-intercept-mouth_offset, -vx,
-                                          radius_x, start, stop)
-                    if yi and xi and max(yi[0],xi[0]) <= min(yi[1],xi[1]):
-                        contact = max(yi[0],xi[0])
-                        if t.kind == 'bomb':
-                            collision = contact if collision is None else min(collision, contact)
-                        elif t.seen == timestamp and t.speed > .01:
-                            catches[t.id] = min(catches.get(t.id, math.inf), contact)
-            return collision, catches
+            return evaluate_trajectory(choices, cfg, segments, horizon)
 
         for name, target in unique_targets:
             distance = abs(target-x)

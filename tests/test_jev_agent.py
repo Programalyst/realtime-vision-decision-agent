@@ -1,25 +1,11 @@
 import time
 import unittest
-from types import SimpleNamespace
-from jev_agent import JevAgent, DragController
-import json
-import httpx2
-from typesafe_sdk import TypeSafeClient, RetryPolicy
+from jev_agent import DragController
 from choice_preprocessor import Candidate
 
 
 STATE = {'objects': [{'class': 'watering_can', 'confidence': .9,
                      'box': [.4, .8, .6, .9], 'center': [.5, .85]}]}
-
-
-class FakeClient:
-    def __init__(self):
-        self.calls = 0
-    def system_one(self, **kwargs):
-        self.calls += 1
-        return SimpleNamespace(choices={'movement': SimpleNamespace(choice='right', confidence=.8)})
-    def close(self):
-        pass
 
 
 class FakeDevice:
@@ -84,79 +70,9 @@ class IntegrationTests(unittest.TestCase):
         finally:
             control.close()
 
-    def test_pause_suppresses_requests_and_discards_old_response(self):
-        agent = JevAgent(client=FakeClient(), interval=10)
-        try:
-            agent.set_enabled(False)
-            agent.update(STATE, time.monotonic())
-            self.assertEqual(agent.client.calls, 0)
-            agent.set_enabled(True)
-            agent.update(STATE, time.monotonic())
-            agent.future.result(timeout=1)
-            agent.set_enabled(False)
-            self.assertIsNone(agent.decision)
-            agent.set_enabled(True)
-            agent.update(STATE, time.monotonic())
-            self.assertIsNone(agent.decision)
-            self.assertIn('pre-pause', agent.status)
-        finally:
-            agent.close()
 
-    def test_real_sdk_request_and_response(self):
-        requests = []
-        def respond(request):
-            requests.append(json.loads(request.content))
-            return httpx2.Response(200, json={
-                'model': 'jev-latest',
-                'answers': {'movement': {'type': 'choice', 'choice': 'left',
-                            'probabilities': {'left': .9, 'right': .05, 'hold': .05},
-                            'confidence': .8}},
-                'usage': {'input_tokens': 100, 'output_tokens': 10},
-            })
-        client = TypeSafeClient(api_key='offline-test-placeholder',
-                               transport=httpx2.MockTransport(respond),
-                               retry=RetryPolicy(max_retries=0))
-        agent = JevAgent(client=client, interval=10)
-        try:
-            now = time.monotonic()
-            agent.update(STATE, now)
-            agent.future.result(timeout=1)
-            agent.update(STATE, now)
-            self.assertEqual(agent.decision[0], 'left')
-            self.assertEqual(requests[0]['state'], STATE)
-            self.assertEqual(requests[0]['questions']['movement']['type'], 'choice')
-        finally:
-            agent.close()
 
-    def test_response_and_expiration(self):
-        agent = JevAgent(client=FakeClient(), interval=10)
-        try:
-            now = time.monotonic()
-            agent.update(STATE, now)
-            agent.future.result(timeout=1)
-            agent.update(STATE, now)
-            self.assertEqual(agent.decision[0], 'right')
-            agent.decision = ('right', .8, now - 10)
-            agent.update(STATE, now)
-            self.assertIsNone(agent.decision)
-            self.assertEqual(agent.client.calls, 1)
-        finally:
-            agent.close()
 
-    def test_stale_response_and_missing_can(self):
-        agent = JevAgent(client=FakeClient(), interval=10)
-        try:
-            now = time.monotonic()
-            agent.update(STATE, now)
-            agent.future.result(timeout=1)
-            agent.observed_at = now - 10
-            agent.update(STATE, now)
-            self.assertIsNone(agent.decision)
-            agent.decision = ('right', .8, now)
-            agent.update({'objects': []}, now)
-            self.assertIsNone(agent.decision)
-        finally:
-            agent.close()
 
     def test_drag_mapping_once_and_stale(self):
         device = FakeDevice()

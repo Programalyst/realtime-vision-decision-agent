@@ -1,8 +1,22 @@
 # Gameplay testing and results
 
+The latest implementation is the [independent timed deterministic runtime](deterministic-execution.md).
+Its predecessor recorded **342 ml** with one clear bomb hit around 28.7 s in
+`runs/deterministic/20260922-142630-082328/annotated.mp4`. The new runtime has
+82 passing offline tests and an 18-scenario synthetic timing sweep, but no live
+result yet. An exploratory pre-hit fit found about 195 ms combined input/feedback
+lag; the new defaults split this into an assumed 80 ms input delay and 120 ms
+feedback delay. That split still needs device calibration. Current work focuses
+on deterministic control; Jev's policy/executor have not been migrated.
+
 Use this log for the next available daily attempts and for a subsequent public
 results post. Preserve the distinction between measured scores, manual
 observations, and behavior only covered by offline tests.
+
+This is a chronological log: earlier sections describe the implementation at
+that time. For the current controller and validation status, see
+[rolling schedules](#rolling-schedules-and-latency-aware-jev-integration) below
+and the [current design](rolling-schedules.md).
 
 ## Observations so far
 
@@ -63,8 +77,8 @@ explicit candidate type. Do not attribute that capability to this version.
    ```
 
    It reads `JEV_API_KEY` from ignored `.env`. Use J in the same way. Recordings
-   are saved under `runs/jev/<timestamp>/annotated.mp4`; Jev mode does not produce
-   the deterministic candidate log.
+   are saved under `runs/jev/<timestamp>/annotated.mp4`; Jev mode now also writes
+   `decisions.jsonl`, including API request/response events and discard reasons.
 7. Review the videos before changing parameters. Mark the timestamps of bomb
    hits, missed droplets, delayed escapes, and movements that stop short.
 
@@ -207,3 +221,187 @@ measure the controller's hypothetical score or verify ADB responsiveness.
 Forty-two tests pass, including missing-frame timestamp interpolation and
 rejection of invalid timestamp order. No live policy tuning was done from this
 reference run alone.
+
+
+## Dynamic Jev integration (implemented after offline reference review)
+
+Jev now receives the shared row-mode candidate geometry and uses the same target
+drag executor. The old fixed-step Jev descriptions above are historical.
+Requests remain independent: no conversation history is sent. Python tracking
+supplies estimated motion in each request. The API selects one dynamic ID;
+Python rechecks its current path and rejects stale, changed-row, or unsafe
+answers without a deterministic fallback. Default request spacing and maximum
+request-observation age are both 0.5 s and can be configured separately.
+
+Before interpreting a live result, inspect `jev_events` in `decisions.jsonl`:
+request latency, accepted answers, and discard reasons may explain missed moves.
+Run deterministic validation first, then Jev. Do not attribute old fixed-step
+results to this integration. SDK serialization and lifecycle behavior are
+covered offline; no live API call or phone run was made during implementation.
+
+## Live deterministic validation: 20260922-112020-980938
+
+User-reported result: **324 ml, two bomb hits**, with improved performance.
+The user estimates a perfect run always yields at least 420 ml; this round is
+therefore at least 96 ml below that reference, not a measured count of missed
+collectibles. Spawn randomness prevents a direct score comparison across rounds.
+Reviewed the annotated video and its matching decision log. Controller code and
+settings were not changed during this review, preserving the Jev comparison.
+
+- The log contains 928 observations, with a median spacing of about 38.8 ms.
+  Across completed logged commands, median submission-to-ADB-return time was
+  about 186 ms. This measures command turnaround, not exact physical movement
+  or capture latency.
+- At 30.978 s and 31.211 s, the active row was bomb 82, but the selected candidate
+  was `catch_84`: align with droplet 84, behind intervening bomb 83. The candidate
+  was marked safe within its evaluation window. At 31.447 s the next bomb was
+  predicted to collide in about 84 ms and the fallback selected `hold`; it
+  continued holding as collision became immediate. An explosion is visible
+  around 31.7 s, followed by disabled-can detections. This supports premature
+  alignment toward a droplet behind a bomb and insufficient preparation for the
+  following hazard, rather than simply a low observation frequency.
+- A second explosion is visible around 35.0 s, after the “TIME'S UP” overlay is
+  already displayed. The score remains 324 ml. Distinguish this post-timeout
+  visible hit from the first hit during the collection window in public results.
+- Some proposals have tight timing: at roughly 7.14 s, `catch_9` predicts contact
+  in about 150 ms. The measured command turnaround suggests little timing slack,
+  but does not by itself prove when the can physically reached that target.
+- Collision-box overlaps near 29.6 s and 33.6 s do not alone establish additional
+  bomb hits. Do not count geometric overlaps or repeated disabled detections as
+  separate collisions.
+
+Working hypotheses remain: the short row-based safety window can approve early
+alignment beneath a subsequent bomb; estimated input/travel timing may be too
+optimistic; close droplet/bomb pairs may require explicit catch-then-escape
+planning. Do not treat those hypotheses as calibrated physics. Next step is the
+planned dynamic Jev run with unchanged shared movement settings, inspecting API
+latency and response rejections alongside actual gameplay.
+
+
+## Conditional sequence implementation after the 22 September review
+
+Before spending an attempt on Jev, the user requested conditional sequence
+planning in deterministic control. Implemented in `conditional_planner.py`:
+dodge/wait/return for leading bombs, catch/escape for following bombs, retained
+phases and hazard estimates, fixed escape deadlines, and full-path revalidation.
+See [sequence design and validation](conditional-sequences.md). 57 offline tests
+pass. A logged-observation replay changes the reviewed pre-hit `catch_84` choices
+to an escape destination; it does not establish counterfactual live outcomes.
+
+**Next:** test this deterministic version first. Jev still receives dynamic
+single-move choices and has not been upgraded to sequence choices. Input timing
+and drag-speed assumptions are unchanged; the new live result remains pending.
+
+## First conditional-sequence live run: 20260922-121715-284925
+
+Reviewed the annotated footage and decision log without modifying controller
+code. The result screen at about 35.9 s confirms **228 ml**, compared with 324 ml
+in the preceding row-policy run. The user described this run as seeming better;
+movement can look calmer, but this trial collected 96 ml less. Spawn randomness
+still prevents attributing the entire score difference to the code change.
+
+One visible in-play explosion occurs around 25.6–26.1 s. Disabled-can detections
+span 25.95–27.65 s and briefly 28.42–28.57 s; the later labels do not establish a
+second hit. The previous run had one confirmed in-play explosion and another
+after TIME'S UP, so these recordings do not establish improved in-play bomb
+avoidance from the sequence policy.
+
+| Source time | Observation | Interpretation |
+| --- | --- | --- |
+| 3.47–5.32 s | Controller waits for the leading bombs; a return command is logged at 5.202 s and the counter reaches 6 ml by 5.32 s. | The wait/return transition is functioning; this alone does not validate every timing estimate. |
+| 6.09–7.93 s | Escape plan for droplet 8/bomb 12 persists while droplets 9, 10, and 11 pass in other columns. The score stays at 18 ml across the inspected frames. | The builder pairs a catch with a later bomb despite intervening droplets, and the escape phase prevents reconsidering those opportunities. First and escape destinations are identical in this plan. |
+| 14.10–15.49 s | Escape plan for droplet 32/bomb 36 persists at a right-side destination while droplets 34 and 35 approach/pass on the left. | Another example of retaining a safe refuge too long rather than planning the next collectible. |
+| 25.371 s | A dodge/return plan selects x≈0.620 from observed body-center x≈0.158 and marks it safe. | Large alignment move is permitted under the current timing model. |
+| 25.678 s | ADB has returned after about 264 ms; observed x≈0.352 is still short of x≈0.620. An explosion follows/is visible in this interval. | Command completion does not prove physical arrival; current path/timing/geometry estimates did not prevent this hit. The footage does not isolate which timing component is responsible. |
+| 35.936 s | Result screen shows 228 ml. | Confirmed final collection total. |
+
+The log contains 940 observations with median spacing about **38.8 ms** and 145
+unique command submissions. Median completed-command turnaround is about
+**186.6 ms**, nearly unchanged from the preceding run. It is not a measurement
+of exact physical movement duration. Long escape phases are therefore a policy
+issue visible independently of any change in observation frequency.
+
+Recommended next refinement, **not implemented in this review**: avoid treating
+a distant following bomb as an immediate catch/escape pair when collectibles
+intervene; finish or interrupt an escape commitment once the can is clear and a
+new safe collectible opportunity exists, rechecking the full path and the bomb
+clearance constraints. Preserve the working wait-before-crossing behavior.
+Revisit movement timing separately using command and observed-position evidence.
+Do not describe this trial as a demonstrated collection improvement or copy the
+current long-lived escape commitment into Jev without that qualification.
+
+## Dynamic Jev live validation: 20260922-131550-168356
+
+Result screen confirms **114 ml**. Reviewed footage and request/response events;
+no controller code was changed. The planned showcase edit/post should wait for
+an integration fix rather than present selected successful moments as a fair
+comparison.
+
+The complete 39.08 s session contains 1,009 logged observations, 62 requests,
+61 returned responses, nine accepted responses, and nine logged command
+submissions. Counts include pre-game/result-screen time; one acceptance at
+38.62 s occurs on the result screen, so nine commands is not nine useful
+in-game actions. There were no logged API errors.
+
+| Response outcome | Count |
+| --- | ---: |
+| Accepted | 9 |
+| Active row changed | 27 |
+| Originating observation older than 500 ms | 24 |
+| Drag in progress | 1 |
+
+All 27 combined `can missing or active row changed` rejections had a visible can:
+the active-row condition was responsible. Fourteen selected candidate IDs still
+existed at response time, and seven were still marked safe within their current
+evaluation window. This does not prove those seven remained useful/reachable,
+but shows that active-row identity is an overly coarse validity proxy.
+
+Median SDK-call elapsed time was **416.7 ms**, with a range of **322.4–1,985.4 ms**.
+Median observation age when responses were consumed was **449.6 ms**. Only 13
+SDK calls exceeded 500 ms; the age check also includes observation/request and
+main-loop handling delays. The 500 ms age budget therefore rejected more than
+just calls taking over 500 ms. Request spacing was also at least 500 ms.
+
+Primary finding: the implemented control loop was starved of executable
+responses by latency, row-change invalidation, and the lack of a fallback.
+This result does not isolate Jev's choice quality, and reducing the problem to
+insufficient model reasoning would not be supported by these logs. The
+integration should have been tested against realistic response delays offline
+before consuming a live attempt.
+
+Recommended next work, not implemented in this review: evaluate retained
+object/plan relevance rather than requiring unchanged active-row identity;
+request decisions far enough ahead for measured API delay; keep immediate
+execution and hazard handling local. If a deterministic safety fallback is
+introduced, label the resulting controller as hybrid and log which component
+selected each action. Merely increasing the age limit would permit outdated
+commands and is not an adequate fix. Validate latency and invalidation behavior
+with delayed mocked responses or recorded states before another live attempt.
+
+
+## Rolling schedules and latency-aware Jev integration
+
+Implemented a shared visible-row schedule builder and local runner. The default
+deterministic policy now visits intervening droplets instead of committing to
+one catch and a distant bomb. Jev chooses future schedules; a local near-term
+prefix continues during requests, and remaining intentions are revalidated after
+reply. Active-row changes alone no longer discard responses. Busy replies wait
+for activation instead of being lost. This is explicitly **hybrid control** with
+local startup/repair/safety source attribution.
+
+63 tests pass, including current rolling behavior, delayed mocked API replies,
+SDK serialization, an ideal-motion closed-loop fixture, and retained historical
+regressions. No live API or phone action was performed. A timing-only replay
+using the failed run's recorded delays and a synthetic best-catch selector
+returned 30 replies: 17 activated schedules, 11 failed activation, and two were
+discarded earlier. It logged 70 local invalidations, consistent with the mismatch
+between hypothetical routes and recorded can motion; it is not a score simulation
+or evidence of Jev quality. Details and commands are in
+[rolling schedule design](rolling-schedules.md).
+
+A perfect-human shadow replay processed 915 frames with ten unsafe-proposal
+frames. It cannot establish alternate gameplay results. Defaults reserve 650 ms
+of lead for API latency, adapt that lead using recent latency, retain a two-second
+outer response-age cap, and preserve the 250 ms current-frame freshness check.
+Next live trial remains pending. Report `sequence.source` and plan-activation
+logs when comparing the hybrid run to deterministic control.

@@ -1,6 +1,6 @@
 import unittest
 from choice_preprocessor import ChoicePreprocessor, Candidate, Choices, PlannerConfig, mouth_box
-from deterministic_controller import select_candidate, DeterministicController
+from deterministic_controller import select_candidate, ConditionalController as DeterministicController
 
 
 def obj(kind,x,y,w=.04,h=.04):

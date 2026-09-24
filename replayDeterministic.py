@@ -1,7 +1,8 @@
-"""Shadow-test the controller on a video and its original testYoloVideo CSV.
+"""Shadow-test the historical observation-driven controller on video/YOLO CSV.
 
 The recorded can always follows the human. Proposals do not change the scene;
 this is policy inspection, not a simulated score or bomb-hit measurement.
+The new live timed executor is tested by simulateDeterministic.py instead.
 """
 import argparse
 from bisect import bisect_left
@@ -116,6 +117,7 @@ def main():
                 counts['unsafe_proposal_frames'] += decision is not None and not decision.safe
                 log.write(json.dumps({'source_frame': index, 'source_time': timestamp,
                                       'status': status, 'active_row': policy.active_track,
+                                      'sequence': policy.sequence.snapshot,
                                       'selected': asdict(decision) if decision else None,
                                       'choices': asdict(choices)})+'\n')
                 signature = (policy.active_track, decision.safe if decision else None)
