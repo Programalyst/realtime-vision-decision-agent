@@ -261,7 +261,7 @@ class RuntimeTests(unittest.TestCase):
         runtime, executor, clock, choices = self.restore_fallback_case(self.fallback_cases()[1])
         old_plan, old_actions = runtime.active, runtime.actions
         with patch.object(runtime.estimator, 'update', return_value=choices), \
-             patch.object(runtime.builder, 'build', return_value=[]) as search:
+             patch.object(runtime.builder, 'build_schedules', return_value=[]) as search:
             runtime.update({}, 1, clock.now)
         search.assert_called_once()
         self.assertIs(runtime.active, old_plan)
@@ -277,7 +277,7 @@ class RuntimeTests(unittest.TestCase):
             started_at=clock.now-.04-motion.input_delay-motion.action.duration)
         old_plan = runtime.active
         with patch.object(runtime.estimator, 'update', return_value=choices), \
-             patch.object(runtime.builder, 'build') as search:
+             patch.object(runtime.builder, 'build_schedules') as search:
             runtime.update({}, 1, clock.now)
         search.assert_not_called()
         self.assertIs(runtime.active, old_plan)
@@ -292,7 +292,7 @@ class RuntimeTests(unittest.TestCase):
         runtime, executor, clock, choices = self.restore_fallback_case(case)
         old_plan = runtime.active
         with patch.object(runtime.estimator, 'update', return_value=choices), \
-             patch.object(runtime.builder, 'build') as search:
+             patch.object(runtime.builder, 'build_schedules') as search:
             runtime.update({}, 1, clock.now)
         search.assert_not_called()
         self.assertIs(runtime.active, old_plan)
@@ -330,7 +330,7 @@ class RuntimeTests(unittest.TestCase):
         clock = Clock(); executor = TimedExecutor(clock=clock)
         runtime = DeterministicRuntime(executor, clock=clock)
         runtime.set_enabled(True); runtime.choices = choices
-        plans = runtime.builder.build(choices)
+        plans = runtime.builder.build_schedules(choices)
         self.assertTrue(plans)
         for plan in plans:
             with self.subTest(plan=plan.id):

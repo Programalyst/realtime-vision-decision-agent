@@ -22,6 +22,7 @@ class Action:
     latest_start: float
     duration: float
     release_at: float
+    source: str = 'deterministic_timed'
 
 
 @dataclass(frozen=True)
@@ -179,7 +180,7 @@ class TimedExecutor:
                 self.consumed.add(action.id)
                 self.revision += 1
                 if not action.duration:
-                    self._event('hold', action_id=action.id, row=action.row)
+                    self._event('hold', action_id=action.id, row=action.row, source=action.source)
                     continue
                 motion = Motion(action, now, self.input_delay)
                 self.active = motion

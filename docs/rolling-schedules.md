@@ -1,8 +1,9 @@
 # Rolling visible-row schedules
 
-Historical shared-runner design. The latest live deterministic mode uses the
-[timed executor](deterministic-execution.md); Jev and historical shadow replay
-retain the runner described here. The route-search builder is still shared.
+Historical shared-runner design. Both live deterministic and Jev modes now use
+the [timed executor](deterministic-execution.md). Historical shadow replay and
+`replayJevTiming.py` retain the runner described here. The route-search builder
+is still shared. See [current Jev integration](jev-policy.md) for live behavior.
 
 Implemented after the 22 September Jev run exposed a timing mismatch: 61 answers
 returned, but only nine were accepted by the immediate-action integration.

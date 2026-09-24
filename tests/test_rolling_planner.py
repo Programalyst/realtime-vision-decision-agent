@@ -25,7 +25,7 @@ class RollingTests(unittest.TestCase):
     def test_intervening_droplets_are_part_of_schedule_before_later_bomb(self):
         c=initial(obj('droplet',.5072,.74),obj('droplet',.65,.60),
                   obj('droplet',.3,.46),obj('bomb',.5072,.32))
-        plans=ScheduleBuilder(PlannerConfig()).build(c)
+        plans=ScheduleBuilder(PlannerConfig()).build_schedules(c)
         self.assertTrue(plans)
         self.assertEqual([(s.track_id,s.kind)for s in plans[0].steps],
                          [(1,'collect'),(2,'collect'),(3,'collect'),(4,'dodge')])
@@ -34,7 +34,7 @@ class RollingTests(unittest.TestCase):
 
     def test_bomb_clearance_precedes_return_to_same_column(self):
         c=initial(obj('bomb',.5072,.70),obj('droplet',.5072,.50))
-        builder=ScheduleBuilder(PlannerConfig());plan=builder.build(c)[0]
+        builder=ScheduleBuilder(PlannerConfig());plan=builder.build_schedules(c)[0]
         dodge,collect=plan.steps
         self.assertEqual((dodge.kind,collect.kind),('dodge','collect'))
         self.assertAlmostEqual(collect.command_at,10+builder.bomb_clearance(c.tracks[0],c)+.005)
@@ -54,7 +54,7 @@ class RollingTests(unittest.TestCase):
         self.assertAlmostEqual(builder.bomb_clearance(expanded,c),expected)
         self.assertAlmostEqual(builder.bomb_clearance(expanded,replace(c,timestamp=10.1)),expected-.1)
         self.assertGreater(builder.window(expanded,c)[1],expected)
-        plans=builder.build(replace(c,tracks=[expanded]))
+        plans=builder.build_schedules(replace(c,tracks=[expanded]))
         self.assertTrue(plans)
         self.assertAlmostEqual(plans[0].steps[0].release_at,10+expected+.005)
 
@@ -89,7 +89,7 @@ class RollingTests(unittest.TestCase):
         c=initial(obj('droplet',.5072,.74),obj('droplet',.65,.60),
                   obj('droplet',.3,.46),obj('droplet',.7,.32),obj('droplet',.4,.18))
         planner=RollingPlanner(PlannerConfig());planner.update(c)
-        plans=planner.builder.build(c,start_delay=.65,prefix=planner.active)
+        plans=planner.builder.build_schedules(c,start_delay=.65,prefix=planner.active)
         self.assertTrue(plans)
         for plan in plans:
             for dt in [.05,.2,.4,.64]:

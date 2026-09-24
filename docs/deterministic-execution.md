@@ -2,9 +2,10 @@
 
 Implemented on 22 September after reviewing the 342 ml run. The next live
 deterministic run reached 372 ml with no reported bomb hits; timing assumptions
-still need calibration. The latest completed run reached a reported 402 ml
-without bomb hits. The shorter post-catch hold below awaits a live test.
-Jev's policy/executor remain on the previous design.
+still need calibration. The 24 September milestone run reached 456 ml with no
+bomb-hit indication. Live Jev mode now uses this same runtime through
+`jev_timed_runtime.py`; see [Jev policy](jev-policy.md) for its asynchronous route
+selection and provenance logging. The new Jev integration awaits a live test.
 
 ## Run
 
@@ -23,6 +24,7 @@ The new files separate responsibilities:
 | `frame_observer.py` | Decode callback, sequence IDs, latest-frame mailbox |
 | `motion_estimator.py` | Delayed observations, command-history projection, robust vertical-speed estimate |
 | `deterministic_runtime.py` | Validate retained routes, revise future steps, publish versioned schedules |
+| `jev_timed_runtime.py` | Optional asynchronous Jev route selection on the same runtime |
 | `timed_executor.py` | Independent deadline worker, command lifecycle, expiry and cancellation |
 | `scrcpy_drag.py` | Optional persistent-touch transport |
 | `simulateDeterministic.py` | Synthetic closed-loop timing fixture and parameter sweep |

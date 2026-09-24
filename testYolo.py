@@ -13,10 +13,11 @@ import json
 from video_writer import H264Writer
 from dotenv import load_dotenv
 from deterministic_runtime import DeterministicRuntime
+from jev_timed_runtime import TimedJevRuntime
 from timed_executor import TimedExecutor, AdbTransport
 from frame_observer import FrameObserver
 from choice_preprocessor import PlannerConfig, mouth_box
-from jev_agent import JevAgent, DragController, detection_state
+from jev_agent import detection_state
 
 # --- 1. Initialization ---
 
@@ -25,7 +26,7 @@ DETECTION_CONFIDENCE: float = 0.25
 parser = argparse.ArgumentParser(description="Live YOLO detection with timed deterministic control or optional Jev advice")
 mode = parser.add_mutually_exclusive_group()
 mode.add_argument("--deterministic", action="store_true", help="Use local motion planning and deterministic choices (no API)")
-mode.add_argument("--jev", action="store_true", help="Send detections to Jev and display movement advice")
+mode.add_argument("--jev", action="store_true", help="Let Jev select future routes using the shared timed controller")
 parser.add_argument("--control", action="store_true", help="Apply selected destinations as drags; requires --jev or --deterministic")
 parser.add_argument("--jev-interval", type=float, default=0.5, help="Minimum seconds between API requests")
 parser.add_argument("--drag-speed", type=float, default=3.0,
@@ -35,13 +36,13 @@ parser.add_argument("--input-delay", type=float, default=0.08,
 parser.add_argument("--jev-max-age", type=float, default=2.0, help="Outer response-age limit; remaining schedule is revalidated")
 parser.add_argument("--jev-lead", type=float, default=0.65, help="Minimum lookahead reserved for API latency")
 parser.add_argument("--feedback-delay", type=float, default=.12,
-                    help="Deterministic assumed phone-to-decode delay in seconds; calibrate from logs")
+                    help="Assumed phone-to-decode delay in seconds; calibrate from logs")
 parser.add_argument("--timing-uncertainty", type=float, default=.02,
-                    help="Deterministic timing margin in seconds")
+                    help="Timing margin in seconds for either control mode")
 parser.add_argument("--plan-interval", type=float, default=.15,
-                    help="Background deterministic route-search interval; hazards trigger immediately")
+                    help="Background local route-search interval; hazards trigger immediately")
 parser.add_argument("--input-transport", choices=("adb", "scrcpy"), default="adb",
-                    help="Deterministic input transport; scrcpy held touch is experimental")
+                    help="Input transport for either mode; scrcpy held touch is experimental")
 args = parser.parse_args()
 load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 if args.control and not (args.jev or args.deterministic):
@@ -86,7 +87,7 @@ observer = FrameObserver()
 video_stream = VideoAdapter(video_config, frame_update_callback=observer.publish)
 video_stream.connect(adb_device)
 timed_executor = None
-if args.deterministic:
+if args.deterministic or args.jev:
     transport = None
     if args.control:
         if args.input_transport == 'scrcpy':
@@ -95,16 +96,18 @@ if args.deterministic:
         else:
             transport = AdbTransport(adb_device)
     timed_executor = TimedExecutor(transport, input_delay=args.input_delay, threaded=args.control)
-    jev = DeterministicRuntime(timed_executor, planner_config, decode_delay=args.feedback_delay,
-                              timing_uncertainty=args.timing_uncertainty,
-                              search_interval=args.plan_interval, control=args.control)
+    runtime_kwargs = dict(decode_delay=args.feedback_delay, timing_uncertainty=args.timing_uncertainty,
+                          search_interval=args.plan_interval, control=args.control)
+    if args.jev:
+        jev = TimedJevRuntime(timed_executor, planner_config, interval=args.jev_interval,
+                             max_age=args.jev_max_age, lead=args.jev_lead, **runtime_kwargs)
+    else:
+        jev = DeterministicRuntime(timed_executor, planner_config, **runtime_kwargs)
 else:
-    jev = JevAgent(interval=args.jev_interval, max_age=args.jev_max_age,
-                   config=planner_config, lead=args.jev_lead) if args.jev else None
+    jev = None
 mode_name = "Rules" if args.deterministic else "Jev"
 if jev:
     jev.set_enabled(False)
-controller = DragController(adb_device) if args.control and args.jev else None
 recording = None
 recording_path = None
 recording_started = None
@@ -147,8 +150,6 @@ try:
                 break
             if jev and key in (ord('j'), ord('J')) and jev.enabled:
                 jev.set_enabled(False)
-                if controller:
-                    controller.pause()
                 finish_recording()
             continue
         captured_at = decoded.decoded_at  # decode time, NOT phone capture time
@@ -162,17 +163,13 @@ try:
         inference_finished = time.monotonic()
         if jev:
             state = detection_state(results[0])
-            movement_ready = controller.ready_for_target(state, captured_at) if controller else True
-            if args.deterministic:
-                jev_status = jev.update(state, decoded.sequence, captured_at)
-                movement_ready = timed_executor.snapshot()['active'] is None
-            else:
-                jev_status = jev.update(state, captured_at, movement_ready=movement_ready)
+            jev_status = jev.update(state, decoded.sequence, captured_at)
+            movement_ready = timed_executor.snapshot()['active'] is None
             planning_finished = time.monotonic()
             if jev.choices is None:
                 continue
             displayed_mouth = (mouth_box(jev.estimator.raw.can, planner_config)
-                               if args.deterministic and jev.estimator.raw and jev.estimator.raw.can
+                               if jev.estimator.raw and jev.estimator.raw.can
                                else jev.choices.mouth_box)
             if displayed_mouth:
                 mx1, my1, mx2, my2 = displayed_mouth
@@ -186,7 +183,7 @@ try:
                               (0, 255, 255), 1)
             if jev.decision:
                 target = jev.decision.target_x
-                if args.deterministic and jev.choices.mouth_box:
+                if jev.choices.mouth_box:
                     target += (jev.choices.mouth_box[0]+jev.choices.mouth_box[2])/2-jev.choices.can['center'][0]
                 target_x = round(target * frame.shape[1])
                 cv2.line(frame, (target_x, 0), (target_x, frame.shape[0]-1), (255, 255, 0), 1)
@@ -199,20 +196,17 @@ try:
                         "active_row": jev.active_track,
                         "movement_ready": movement_ready,
                         "jev_events": getattr(jev, "events", []),
-                        "sequence": jev.snapshot if args.deterministic else jev.sequence.snapshot,
+                        "sequence": jev.snapshot,
                         "timing": {"frame_sequence": decoded.sequence, "decoded_at": captured_at,
                                    "inference_started": inference_started, "inference_finished": inference_finished,
                                    "planning_finished": planning_finished},
-                        "estimator": jev.estimator.snapshot if args.deterministic else None,
+                        "estimator": jev.estimator.snapshot,
                         "executor": ({"version": executor_snapshot['version'],
                                       "active": asdict(executor_snapshot['active']) if executor_snapshot['active'] else None}
-                                     if args.deterministic else None),
-                        "motion": controller.motion_status if controller else None,
-                        "previous_motion": controller.previous_motion if controller else None,
+                                     if timed_executor else None),
+                        "motion": None,
+                        "previous_motion": None,
                 }) + "\n")
-            if controller and jev.enabled:
-                control_state = {**state, "objects": [jev.choices.can] if jev.choices.can else []}
-                controller.update_target(jev.decision, control_state, captured_at)
             cv2.putText(frame, jev_status, (20, 65), cv_font, label_font_scale, box_color, 2)
         for result in results:
             for box in result.boxes:
@@ -273,8 +267,6 @@ try:
                 last_recorded_frame = None
                 print(f"Recording {mode_name} session: {recording_path}")
             jev.set_enabled(not jev.enabled)
-            if controller and not jev.enabled:
-                controller.pause()
             if not jev.enabled:
                 finish_recording()
             print(f"{mode_name} RUNNING" if jev.enabled else f"{mode_name} PAUSED")
@@ -288,9 +280,6 @@ finally:
     if jev:
         jev.set_enabled(False)
         jev.close()
-    if controller:
-        controller.pause()
-        controller.close()
     finish_recording()
     observer.close()
     cv2.destroyAllWindows()

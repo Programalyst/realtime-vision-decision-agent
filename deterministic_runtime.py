@@ -4,7 +4,7 @@ The historical controller remains available for replay comparison. Live rules
 mode uses this runtime: observations validate a retained schedule; only changed
 or expired routes trigger a search. No Jev calls are involved.
 """
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import math
 import time
 
@@ -59,7 +59,7 @@ class DeterministicRuntime:
     def snapshot(self):
         return dict(plan=asdict(self.active) if self.active else None,
                     actions=[asdict(a) for a in self.actions], version=self.version,
-                    reason=self.reason, source='deterministic_timed',
+                    reason=self.reason, source=self.active.source if self.active else 'deterministic_timed',
                     completed_rows=sorted(self.done), control=self.control)
 
     def _invalidate(self, reason, cancel_current=False):
@@ -129,7 +129,15 @@ class DeterministicRuntime:
                     return False
         return True
 
-    def _actions(self, plan, old_actions, now):
+    def _planning_commitment(self, execution, now, replace_fallback=False):
+        committed = [a for a in self.actions if a.id in execution['consumed'] and a.release_at > now
+                     and not (replace_fallback and a.row < 0)]
+        cutoff = max((a.release_at-now for a in committed), default=0.)
+        if execution['active']:
+            cutoff = max(cutoff, execution['active'].ends_at+self.config.replan_allowance-now)
+        return max(0., cutoff)
+
+    def _actions(self, plan, old_actions, now, *, version=None):
         result = []
         x = self.choices.can['center'][0]
         old = {a.row: a for a in old_actions}
@@ -139,17 +147,80 @@ class DeterministicRuntime:
             # The builder copied a committed prefix: preserve its command ID so
             # replacing the future schedule cannot resend that movement.
             prior = old.get(step.track_id)
-            if prior and abs(prior.start_at-step.command_at) < 1e-5:
+            if (prior and abs(prior.start_at-step.command_at) < 1e-5
+                    and abs(prior.target_x-step.target_x) < 1e-6 and prior.kind == step.kind):
                 action = prior
             else:
                 duration = self.builder.duration(x, step.target_x)
-                action = Action(f'{self.executor.generation}:{self.version}:{step.track_id}',
+                action = Action(f'{self.executor.generation}:{self.version if version is None else version}:{step.track_id}',
                                 step.track_id, step.kind, x, step.target_x,
                                 self.choices.can['center'][1], step.command_at,
-                                step.command_at+.035, duration, step.release_at)
+                                step.command_at+.035, duration, step.release_at, source=plan.source)
             result.append(action)
             x = step.target_x
         return tuple(result)
+
+    def adopt_schedule(self, schedule, now):
+        """Rebuild external intentions on fresh geometry and atomically publish.
+
+        No old movement timestamps are replayed. New/unselected rows remain
+        collision hazards but are not added as collection objectives here.
+        """
+        choices = self.choices
+        execution = self.executor.snapshot()
+        if (not self.enabled or not choices or not choices.can or not self.active
+                or not 0 <= now-choices.timestamp <= self.lease or execution['error']):
+            return False, 'no fresh active route'
+        cutoff = self._planning_commitment(execution, now,
+                    self._can_replace_fallback_wait(execution, now))
+        preferences = {s.track_id: s for s in schedule.steps if s.track_id not in self.done}
+        routes = self.builder.build_schedules(choices, done=self.done, preferences=preferences,
+                    start_delay=cutoff, prefix=self.active if cutoff else None, limit=1)
+        if not routes:
+            return False, 'remaining route infeasible'
+        proposed = routes[0]
+        # A copied local prefix alone is not an accepted Jev decision. Require
+        # at least one still-reachable chosen catch beyond that commitment.
+        if not any(s.kind == 'collect' and s.track_id in preferences
+                   and preferences[s.track_id].kind == 'collect'
+                   and s.track_id not in self.done and s.command_at >= now+cutoff-1e-6
+                   for s in proposed.steps):
+            return False, 'no remaining chosen catch'
+        proposed.id, proposed.source = schedule.id, 'jev'
+        version = self.version+1
+        actions = self._actions(proposed, self.actions, now, version=version)
+        # Retain IDs/timing for matching commands, but credit unconsumed actions
+        # to the newly accepted selection. Already dispatched input keeps its source.
+        actions = tuple(replace(a, source='jev') if a.id not in execution['consumed'] else a
+                        for a in actions)
+        if not any(a.source == 'jev' and a.id not in execution['consumed']
+                   and a.kind == 'collect' and a.row in preferences
+                   and preferences[a.row].kind == 'collect' for a in actions):
+            return False, 'no remaining chosen action'
+        try:
+            accepted = self.executor.publish(actions, version=version,
+                generation=execution['generation'], revision=execution['revision'],
+                valid_until=choices.timestamp+self.lease,
+                pose=(choices.can['center'][0], choices.timestamp)) if self.control else True
+        except ValueError:
+            return False, 'invalid action schedule'
+        if not accepted:
+            return False, 'executor changed during planning'
+        self.active, self.actions, self.version = proposed, actions, version
+        self.events.append(dict(type='plan_replaced', version=version, reason='Jev selection', source='jev'))
+        self._refresh_decision(now)
+        return True, None
+
+    def _refresh_decision(self, now):
+        upcoming = next((s for s in self.active.steps
+                         if s.kind != 'skip' and s.release_at > now), None)
+        self.active_track = upcoming.track_id if upcoming else None
+        self.reason = f'plan {self.version}: {upcoming.kind} row {upcoming.track_id}' if upcoming else 'plan complete'
+        self.decision = None
+        if upcoming:
+            self.decision = Candidate(f'timed_{upcoming.kind}_{upcoming.track_id}', upcoming.target_x,
+                                      0., abs(upcoming.target_x-self.choices.can['center'][0]), None,
+                                      upcoming.event_at-now if upcoming.kind == 'collect' else None)
 
     def update(self, state, sequence, decoded_at, *, now=None):
         now = self.clock() if now is None else now
@@ -185,16 +256,15 @@ class DeterministicRuntime:
             self.reason = 'waiting for already dispatched movement to finish'
             return 'Rules: '+self.reason
         replace_fallback = self._can_replace_fallback_wait(execution, now)
-        if not valid or now >= self.next_search or replace_fallback:
+        # A valid externally selected policy is retained until it finishes or
+        # becomes unsafe/unreachable; local optimization must not silently undo it.
+        local_improvement = not old_plan or old_plan.source != 'jev'
+        if not valid or (local_improvement and (now >= self.next_search or replace_fallback)):
             # A dispatched action and its hold interval remain committed even if
             # a delayed observation disagrees. Only completed fallback waits are
             # interruptible; collection and real bomb-row commitments stay intact.
-            committed = [a for a in old_actions if a.id in execution['consumed'] and a.release_at > now
-                         and not (replace_fallback and a.row < 0)]
-            cutoff = max((a.release_at-now for a in committed), default=0.)
-            if execution['active']:
-                cutoff = max(cutoff, execution['active'].ends_at+self.config.replan_allowance-now)
-            routes = self.builder.build(choices, done=self.done, start_delay=max(0., cutoff),
+            cutoff = self._planning_commitment(execution, now, replace_fallback)
+            routes = self.builder.build_schedules(choices, done=self.done, start_delay=max(0., cutoff),
                                         prefix=old_plan if cutoff else None, limit=1)
             self.next_search = now+self.search_interval
             if routes:
@@ -247,14 +317,7 @@ class DeterministicRuntime:
                 self.active, self.actions = old_plan, old_actions
                 self.reason = 'executor changed during planning; retry next frame'
                 return 'Rules: '+self.reason
-            upcoming = next((s for s in self.active.steps
-                             if s.kind != 'skip' and s.release_at > now), None)
-            self.active_track = upcoming.track_id if upcoming else None
-            self.reason = f'plan {self.version}: {upcoming.kind} row {upcoming.track_id}' if upcoming else 'plan complete'
-            if upcoming:
-                self.decision = Candidate(f'timed_{upcoming.kind}_{upcoming.track_id}', upcoming.target_x,
-                                          0., abs(upcoming.target_x-choices.can['center'][0]), None,
-                                          upcoming.event_at-now if upcoming.kind == 'collect' else None)
+            self._refresh_decision(now)
         return 'Rules: '+self.reason
 
     def close(self):

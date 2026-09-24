@@ -153,7 +153,7 @@ class JevAgent:
         if (fresh and self.choices.can and self.sequence.active and self.future is None
                 and self.queued is None and now>=self.next_request and captured_at>=self.enabled_at):
             lead=self.lead
-            schedules=self.sequence.builder.build(self.choices,done=self.sequence.done,
+            schedules=self.sequence.builder.build_schedules(self.choices,done=self.sequence.done,
                         start_delay=lead,prefix=self.sequence.active,limit=4)
             # Ask only about a future collectible, not solely a committed prefix.
             schedules=[s for s in schedules if any(t.kind=='collect' and t.command_at>=captured_at+lead
