@@ -28,6 +28,8 @@ mode = parser.add_mutually_exclusive_group()
 mode.add_argument("--deterministic", action="store_true", help="Use local motion planning and deterministic choices (no API)")
 mode.add_argument("--jev", action="store_true", help="Let Jev select future routes using the shared timed controller")
 parser.add_argument("--control", action="store_true", help="Apply selected destinations as drags; requires --jev or --deterministic")
+parser.add_argument("--no-record", action="store_true",
+                    help="Play or preview without saving video or decision logs")
 parser.add_argument("--jev-interval", type=float, default=0.5, help="Minimum seconds between API requests")
 parser.add_argument("--drag-speed", type=float, default=3.0,
                     help="Planner estimated horizontal speed in screen widths/sec")
@@ -135,6 +137,8 @@ print("Scrcpy stream connected successfully!")
 print("Starting continuous inference... Press 'q' in the display window to quit.")
 if jev:
     print(f"{mode_name} starts PAUSED. Navigate to the game, focus the preview, then press J to start/pause.")
+    if args.no_record:
+        print("Recording disabled: no video or decision logs will be saved.")
 
 # --- 2. Continuous Inference Loop ---
 
@@ -256,7 +260,7 @@ try:
         if key == ord("q"):
             break
         if jev and key in (ord("j"), ord("J")):
-            if not jev.enabled:
+            if not jev.enabled and not args.no_record:
                 recording_dir = Path("runs/deterministic" if args.deterministic else "runs/jev") / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
                 recording_dir.mkdir(parents=True, exist_ok=False)
                 recording_path = recording_dir / "annotated.mp4"

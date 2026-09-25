@@ -108,6 +108,9 @@ uv run python testYolo.py
 
 # Deterministic gameplay; no API key required
 uv run python testYolo.py --deterministic --control
+
+# Deterministic gameplay without saving video or decision logs
+uv run python testYolo.py --deterministic --control --no-record
 ```
 
 For Jev-assisted gameplay, put `JEV_API_KEY=your_key_here` in a repository-root
@@ -118,8 +121,11 @@ uv run python testYolo.py --jev --control
 ```
 
 Both control modes start paused. Navigate to the game, focus the preview, and
-press **J** to start control and recording. Press **J** again to stop and finalize
-the recording; **Q** exits. There is no fixed session timeout.
+press **J** to start control (and recording by default). Press **J** again to stop
+and finalize any recording; **Q** exits. There is no fixed session timeout.
+
+Add `--no-record` to either mode to keep the live preview and control without
+creating session files or encoding video.
 
 Sessions save H.264 `annotated.mp4` and `decisions.jsonl` under
 `runs/deterministic/<timestamp>/` or `runs/jev/<timestamp>/`. The cyan line marks
